@@ -4,13 +4,14 @@ import os
 import re
 import sqlite3
 from contextlib import contextmanager
-from datetime import date, datetime, timedelta
+from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from .features import FeatureMixin, currency_fields
 from .telegram_ledger import TelegramLedgerMixin
+from .recurrence import annual_cost, due_dates, start_date
 
 ZONE = ZoneInfo(os.getenv('TZ', 'Asia/Singapore'))
 CATEGORIES = {
@@ -115,6 +116,12 @@ class Ledger(FeatureMixin, TelegramLedgerMixin):
             ''')
             # BEGIN IMMEDIATE also serializes simultaneous first starts of web and bot.
             db.execute('BEGIN IMMEDIATE')
+            columns = {row['name'] for row in db.execute('PRAGMA table_info(subscriptions)')}
+            for name, definition in (('interval_count', 'INTEGER NOT NULL DEFAULT 1'),
+                                     ('interval_unit', "TEXT NOT NULL DEFAULT 'months'"),
+                                     ('start_date', 'TEXT'), ('schedule_effective_from', 'TEXT')):
+                if name not in columns:
+                    db.execute(f'ALTER TABLE subscriptions ADD COLUMN {name} {definition}')
             self.initialize_features(db)
             self.initialize_telegram(db)
             if not db.execute("SELECT 1 FROM meta WHERE key='start_month'").fetchone():
@@ -127,15 +134,18 @@ class Ledger(FeatureMixin, TelegramLedgerMixin):
         as_of = as_of or today()
         with self.db() as db:
             db.execute('BEGIN IMMEDIATE')
-            for sub in db.execute('SELECT * FROM subscriptions WHERE active=1').fetchall():
-                cursor, _ = month_bounds(sub['start_month'])
-                while cursor <= as_of:
-                    due = cursor.replace(day=min(sub['billing_day'], calendar.monthrange(cursor.year, cursor.month)[1]))
-                    if due <= as_of:
-                        db.execute('''INSERT OR IGNORE INTO expenses(amount,category,note,spent_on,source,source_key)
-                            VALUES (?,'subscription',?,?,'subscription',?)''',
-                            (sub['amount'], sub['name'], due.isoformat(), f"subscription:{sub['id']}:{cursor:%Y-%m}"))
-                    cursor = (cursor.replace(day=28) + timedelta(days=4)).replace(day=1)
+            self._sync_subscriptions(db, as_of)
+
+    def _sync_subscriptions(self, db, as_of):
+        for sub in db.execute('SELECT * FROM subscriptions WHERE active=1').fetchall():
+            for due in due_dates(sub, start_date(sub), as_of):
+                period = due.isoformat() if sub['interval_unit'] in ('days', 'weeks') else due.strftime('%Y-%m')
+                # Preserve existing monthly keys, including deleted and edited entries.
+                db.execute('''INSERT OR IGNORE INTO expenses(amount,category,note,spent_on,source,source_key)
+                    SELECT ?,'subscription',?,?,'subscription',? WHERE NOT EXISTS
+                    (SELECT 1 FROM expenses WHERE source_key LIKE ? AND spent_on=?)''',
+                    (sub['amount'], sub['name'], due.isoformat(), f"subscription:{sub['id']}:{period}",
+                     f"subscription:{sub['id']}:%", due.isoformat()))
 
     def validate_expense(self, payload):
         amount = cents(payload.get('amount'))
@@ -197,20 +207,42 @@ class Ledger(FeatureMixin, TelegramLedgerMixin):
             raise ValueError('Active must be true or false.')
         start = payload.get('start_month') or today().strftime('%Y-%m')
         month_bounds(start)
-        # Materialize any due entries using the old terms before changing future terms.
-        self.sync_subscriptions()
         with self.db() as db:
+            db.execute('BEGIN IMMEDIATE')
+            old = db.execute('SELECT * FROM subscriptions WHERE id=?', (identifier,)).fetchone() if identifier is not None else None
+            if identifier is not None and old is None:
+                raise LookupError('Subscription not found.')
+            count = payload.get('interval_count', old['interval_count'] if old else 1)
+            unit = payload.get('interval_unit', old['interval_unit'] if old else 'months')
+            if type(count) is not int or not 1 <= count <= 120:
+                raise ValueError('Billing interval must be a whole number from 1 to 120.')
+            if not isinstance(unit, str) or unit not in ('days', 'weeks', 'months', 'years'):
+                raise ValueError('Billing interval unit must be days, weeks, months, or years.')
+            anchor = start_date(old).isoformat() if old else f'{start}-{min(day, month_bounds(start)[1].day):02d}'
+            if 'start_date' in payload:
+                try:
+                    anchor = date.fromisoformat(payload['start_date']).isoformat()
+                except (ValueError, TypeError):
+                    raise ValueError('Use a valid first billing date in YYYY-MM-DD format.') from None
+                # Keep a legacy day-31 anchor when a form round-trips its clamped date.
+                day = old['billing_day'] if old and anchor == start_date(old).isoformat() and 'billing_day' not in payload else date.fromisoformat(anchor).day
+            elif old and 'billing_day' not in payload:
+                day = old['billing_day']
+            changed = old and (count != old['interval_count'] or unit != old['interval_unit'] or
+                              anchor != start_date(old).isoformat() or day != old['billing_day'] or
+                              (active and not old['active']))
+            effective = today().isoformat() if changed else (old['schedule_effective_from'] if old else None)
+            # Post old terms and save the new schedule under the same write lock.
+            self._sync_subscriptions(db, today())
             if identifier is None:
-                db.execute('INSERT INTO subscriptions(name,amount,billing_day,active,start_month) VALUES (?,?,?,?,?)',
-                           (name.strip(), amount, day, int(active), start))
+                db.execute('''INSERT INTO subscriptions(name,amount,billing_day,active,start_month,
+                           interval_count,interval_unit,start_date,schedule_effective_from) VALUES (?,?,?,?,?,?,?,?,?)''',
+                           (name.strip(), amount, day, int(active), anchor[:7], count, unit, anchor, effective))
             else:
-                old = db.execute('SELECT * FROM subscriptions WHERE id=?', (identifier,)).fetchone()
-                if not old:
-                    raise LookupError('Subscription not found.')
-                # The original start month remains stable; edits never backdate new charges.
-                db.execute('UPDATE subscriptions SET name=?,amount=?,billing_day=?,active=? WHERE id=?',
-                           (name.strip(), amount, day, int(active), identifier))
-        self.sync_subscriptions()
+                db.execute('''UPDATE subscriptions SET name=?,amount=?,billing_day=?,active=?,interval_count=?,
+                           interval_unit=?,start_date=?,schedule_effective_from=? WHERE id=?''',
+                           (name.strip(), amount, day, int(active), count, unit, anchor, effective, identifier))
+            self._sync_subscriptions(db, today())
 
     def summary(self, month=None):
         month = month or today().strftime('%Y-%m')
@@ -223,6 +255,8 @@ class Ledger(FeatureMixin, TelegramLedgerMixin):
                                               (first.isoformat(), last.isoformat()))]
             budget = db.execute('SELECT * FROM budgets WHERE month<=? ORDER BY month DESC LIMIT 1', (month,)).fetchone()
             subs = [dict(r) for r in db.execute('SELECT * FROM subscriptions ORDER BY id')]
+            for sub in subs:
+                sub['start_date'] = start_date(sub).isoformat()
             start_month = db.execute("SELECT value FROM meta WHERE key='start_month'").fetchone()['value']
         totals = {key: 0 for key in CATEGORIES}
         daily = {day: 0 for day in range(1, last.day + 1)}
@@ -239,7 +273,7 @@ class Ledger(FeatureMixin, TelegramLedgerMixin):
                 'categories': [{'id': key, 'label': label, 'color': color, 'amount': totals[key]} for key, (label, color) in CATEGORIES.items()],
                 'daily': [{'day': day, 'amount': value} for day, value in daily.items()],
                 'expenses': rows, 'subscriptions': subs, 'start_month': start_month,
-                'subscription_total': sum(s['amount'] for s in subs if s['active']), **self.feature_summary(month)}
+                'subscription_total': round(sum(annual_cost(s) for s in subs if s['active']) / 12), **self.feature_summary(month)}
 
     def get_state(self, key, default=None):
         with self.db() as db:

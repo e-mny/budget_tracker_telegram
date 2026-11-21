@@ -1,5 +1,4 @@
 """Budgets, goals, comparison views, and durable, configurable notifications."""
-import calendar
 import hashlib
 import json
 import re
@@ -7,6 +6,7 @@ import secrets
 import time
 from datetime import date, timedelta
 from decimal import Decimal, InvalidOperation
+from .recurrence import annual_cost, next_due
 
 CURRENCY_DIGITS = dict.fromkeys('SGD USD EUR GBP MYR THB IDR AUD NZD CNY HKD TWD PHP INR CHF CAD AED'.split(), 2)
 CURRENCY_DIGITS.update(dict.fromkeys('JPY KRW VND'.split(), 0))
@@ -171,16 +171,11 @@ class FeatureMixin:
             subs = [dict(r) for r in db.execute('SELECT * FROM subscriptions WHERE active=1')]
         limits = self.category_limits(month)
         for sub in subs:
-            due_month = today().replace(day=1)
-            for _ in range(3):
-                due = due_month.replace(day=min(sub['billing_day'],calendar.monthrange(due_month.year,due_month.month)[1]))
-                if due >= today() and due.strftime('%Y-%m') >= sub['start_month']:
-                    sub['next_due'] = due.isoformat()
-                    break
-                due_month = (due_month.replace(day=28)+timedelta(days=4)).replace(day=1)
+            due = next_due(sub, today())
+            sub['next_due'] = due.isoformat() if due else None
         return {'category_budgets': limits,'goals': goals,'comparison': self.comparison(month),
                 'notification_settings': self.settings(),'upcoming_subscriptions': subs,
-                'annual_subscription_total': sum(s['amount'] for s in subs)*12,
+                'annual_subscription_total': round(sum(annual_cost(s) for s in subs)),
                 'currencies': list(CURRENCY_DIGITS)}
 
     def pending_notifications(self, now):

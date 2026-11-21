@@ -15,7 +15,7 @@ A private, self-hosted expense tracker with a desktop dashboard and a personal T
 - Travel currency records: original currency/amount and the actual SGD amount charged. No guessed exchange rate.
 - GitHub Actions publishes a tested image on pushes to `main`; a separate Proxmox timer can install updates every five minutes.
 - Add, edit, and delete expenses in the dashboard or Telegram. Telegram submissions, edits and deletions require confirmation.
-- Monthly recurring subscriptions, auto-recorded on the billing day.
+- Recurring subscriptions with custom intervals in days, weeks, months, or years, auto-recorded on their due dates.
 - Billing days initially **1**, editable in the dashboard. Entries begin in the month the database is first created. No earlier expenses are invented.
 - A Telegram recap with a category chart at **23:59 on the last day of each month**, using **Asia/Singapore** time. Missed recaps are delivered after the worker comes back online.
 - Password-protected dashboard and a Telegram allowlist for your private chat and one optional group, with owner-only commands.
@@ -37,7 +37,7 @@ docker compose up -d --build
 docker compose ps
 ```
 
-Open **http://SERVER-LAN-IP:8081** and sign in with that password. Set your budget from **Monthly budget**, and set the actual subscription billing days from **Subscriptions**. The initial day-1 subscription charges are already recorded if day 1 has passed. If you need to correct the current month's dates or amounts, edit those rows in **Transactions** too; subscription changes preserve charges already recorded.
+Open **http://SERVER-LAN-IP:8081** and sign in with that password. Set your budget from **Monthly budget**, and set each subscription’s billing interval and first billing date from **Subscriptions**. The initial day-1 subscription charges are already recorded if day 1 has passed. If you need to correct the current month's dates or amounts, edit those rows in **Transactions** too; subscription changes preserve charges already recorded.
 
 ### Connect a new Telegram bot
 
@@ -80,26 +80,27 @@ See [Telegram's group privacy rules](https://core.telegram.org/bots/features#pri
 
 ### Bot commands
 
-| Command | What it does |
-| --- | --- |
-| `/add 6.50 food Chicken rice` | Preview a new food expense; confirm before saving |
-| `/add 2.20 transport MRT` | Preview a transport expense |
-| `/add 45 personal_care Haircut @2026-11-20` | Preview a past-dated expense |
-| `/whoami` | Show your user, chat and topic IDs for setup |
-| `/recent` | Browse saved expenses with Edit/Delete buttons and pagination |
-| `/recent 2026-10` | Browse a specific month's saved expenses |
-| `/edit 42` | Start a reply-based edit of expense #42 |
-| `/edit 42 7.50 food Corrected lunch` | Preview replacement values for expense #42 |
-| `/delete 42` | Review and explicitly confirm deletion of expense #42 |
-| `/cancel DRAFT_ID` | Discard a pending proposal without changing expenses |
-| `/categories` | List category names and descriptions |
-| `/month` | Current month total, categories, and remaining budget |
-| `/recap` | Send this month's recap and PNG chart now |
-| `/recap 2026-10` | Send a historical month's recap |
-| Send a receipt photo | Extract merchant, total, date, and category into a draft for review |
-| `/receipt DRAFT_ID 12.50 food Merchant @2026-11-20` | Correct a receipt draft, then tap Save receipt |
-| `/add 25 travel Lunch --original USD 18.50` | Record the actual SGD charge and original foreign amount |
-| `/help` | Show command help |
+
+| Command                                             | What it does                                                        |
+| ----------------------------------------------------- | --------------------------------------------------------------------- |
+| `/add 6.50 food Chicken rice`                       | Preview a new food expense; confirm before saving                   |
+| `/add 2.20 transport MRT`                           | Preview a transport expense                                         |
+| `/add 45 personal_care Haircut @2026-11-20`         | Preview a past-dated expense                                        |
+| `/whoami`                                           | Show your user, chat and topic IDs for setup                        |
+| `/recent`                                           | Browse saved expenses with Edit/Delete buttons and pagination       |
+| `/recent 2026-10`                                   | Browse a specific month's saved expenses                            |
+| `/edit 42`                                          | Start a reply-based edit of expense #42                             |
+| `/edit 42 7.50 food Corrected lunch`                | Preview replacement values for expense #42                          |
+| `/delete 42`                                        | Review and explicitly confirm deletion of expense #42               |
+| `/cancel DRAFT_ID`                                  | Discard a pending proposal without changing expenses                |
+| `/categories`                                       | List category names and descriptions                                |
+| `/month`                                            | Current month total, categories, and remaining budget               |
+| `/recap`                                            | Send this month's recap and PNG chart now                           |
+| `/recap 2026-10`                                    | Send a historical month's recap                                     |
+| Send a receipt photo                                | Extract merchant, total, date, and category into a draft for review |
+| `/receipt DRAFT_ID 12.50 food Merchant @2026-11-20` | Correct a receipt draft, then tap Save receipt                      |
+| `/add 25 travel Lunch --original USD 18.50`         | Record the actual SGD charge and original foreign amount            |
+| `/help`                                             | Show command help                                                   |
 
 `/add` creates a durable pending proposal and shows **Confirm expense**, **Edit**, and **Cancel**. Nothing is recorded or counted towards budgets until you tap Confirm expense. Edit opens a reply prompt with the current entry to copy and change; your reply creates a new preview that must be confirmed again. Cancel discards the proposal. A confirmed entry returns its expense ID and Edit/Delete buttons.
 
@@ -124,32 +125,33 @@ Amounts must be positive with at most two decimal places. Dates use the configur
 
 Categories: `food` (including groceries), `transport`, `travel`, `shopping`, `subscription`, `personal_care`, `health`, `fitness`, `entertainment`, `social` (including dates), `gifts` (including donations), `home` (including utilities), `education` (learning/career), `insurance`, and `other`. Your gym membership is initially in subscriptions; one-off sports purchases can use fitness.
 
-Automatic subscription entries already count towards the total and budget. **Do not submit those same charges again through `/add`.** Pausing a subscription stops future unrecorded charges and retains history. Days 29–31 are clamped to the last day of shorter months. Deleting an automatic entry removes it from spending and prevents it from being recreated for that month. Future recurring charges continue; change the subscription settings in the dashboard to pause future billing.
+Automatic subscription entries already count towards the total and budget. **Do not submit those same charges again through `/add`.** Pausing a subscription stops future unrecorded charges and retains history. Set the full amount paid per renewal, a repeat interval (for example, every 3 months or every 1 year), and the first billing date in the dashboard. Existing subscriptions keep their monthly schedule after upgrading. Dates 29–31 are clamped to the last day of shorter months; a February 29 annual plan returns to February 29 in leap years. Monthly equivalents and annual commitments are estimates at current rates (day/week intervals use 365 days per year); spending records the full charge only when due. Schedule edits and resuming a paused subscription apply from today without creating older charges. New subscriptions catch up from their first billing date. Deleting an automatic entry removes it from spending and prevents that charge from being recreated. Future recurring charges continue; change the subscription settings in the dashboard to pause future billing.
 
 ## Monthly recap behavior
 
 Keep the Telegram worker running with internet access. It checks the local calendar after each polling batch. At 23:59 on the final calendar day, it sends one photo containing a chart and a caption with totals, budget status, and category amounts. The chart is generated locally; no third-party chart service receives your ledger.
 
-The recap is a snapshot at dispatch time. Expenses entered afterwards, including later in that final minute, are visible in the dashboard and an on-demand `/recap`; the automatic recap is not reissued. The worker drains queued Telegram messages before sending automatic recaps. Recap delivery state and polling offsets survive restarts. A missed completed-month recap is retried after downtime. Rarely, a crash after Telegram accepts a photo but before the local delivery marker commits can cause a duplicate recap; Telegram provides no general exactly-once send key. Recorded expense submissions and monthly subscription charges have durable deduplication keys.
+The recap is a snapshot at dispatch time. Expenses entered afterwards, including later in that final minute, are visible in the dashboard and an on-demand `/recap`; the automatic recap is not reissued. The worker drains queued Telegram messages before sending automatic recaps. Recap delivery state and polling offsets survive restarts. A missed completed-month recap is retried after downtime. Rarely, a crash after Telegram accepts a photo but before the local delivery marker commits can cause a duplicate recap; Telegram provides no general exactly-once send key. Recorded expense submissions and recurring subscription charges have durable deduplication keys.
 
 This tracks **recorded expenditure**, not bank account balances. Automatic charges represent your configured billing schedule, not confirmation from your bank.
 
 ## Configuration
 
-| Variable | Default / purpose |
-| --- | --- |
-| `DASHBOARD_PASSWORD` | Required; at least 12 characters. Changing it invalidates existing dashboard sessions. |
-| `PORT` | `8081` |
-| `BIND_ADDRESS` | `0.0.0.0`; use the VM's LAN IP or `127.0.0.1` as appropriate |
-| `TZ` | `Asia/Singapore`; used by both services for dates, recurring charges, and recaps |
-| `COOKIE_SECURE` | `false` for trusted LAN HTTP; set `true` when using HTTPS |
-| `TELEGRAM_BOT_TOKEN` | New bot's BotFather token |
-| `TELEGRAM_ALLOWED_USER_ID` | Numeric personal Telegram account ID; only this owner may use the ledger |
-| `TELEGRAM_ALLOWED_GROUP_ID` | Optional negative numeric group/supergroup ID; private access remains available |
-| `TELEGRAM_NOTIFICATION_CHAT` | `auto`: configured group if present, otherwise private; explicit `group` / `private` overrides |
-| `TELEGRAM_NOTIFICATION_THREAD_ID` | `0`; optional positive group topic ID for automatic messages |
-| `COMPOSE_PROFILES` | Set `telegram` to run the optional worker |
-| `DATA_DIR` | Local development only; Docker uses `/data` |
+
+| Variable                          | Default / purpose                                                                              |
+| ----------------------------------- | ------------------------------------------------------------------------------------------------ |
+| `DASHBOARD_PASSWORD`              | Required; at least 12 characters. Changing it invalidates existing dashboard sessions.         |
+| `PORT`                            | `8082`                                                                                         |
+| `BIND_ADDRESS`                    | `0.0.0.0`; use the VM's LAN IP or `127.0.0.1` as appropriate                                   |
+| `TZ`                              | `Asia/Singapore`; used by both services for dates, recurring charges, and recaps               |
+| `COOKIE_SECURE`                   | `false` for trusted LAN HTTP; set `true` when using HTTPS                                      |
+| `TELEGRAM_BOT_TOKEN`              | New bot's BotFather token                                                                      |
+| `TELEGRAM_ALLOWED_USER_ID`        | Numeric personal Telegram account ID; only this owner may use the ledger                       |
+| `TELEGRAM_ALLOWED_GROUP_ID`       | Optional negative numeric group/supergroup ID; private access remains available                |
+| `TELEGRAM_NOTIFICATION_CHAT`      | `auto`: configured group if present, otherwise private; explicit `group` / `private` overrides |
+| `TELEGRAM_NOTIFICATION_THREAD_ID` | `0`; optional positive group topic ID for automatic messages                                   |
+| `COMPOSE_PROFILES`                | Set `telegram` to run the optional worker                                                      |
+| `DATA_DIR`                        | Local development only; Docker uses `/data`                                                    |
 
 For external access, use your VPN or an HTTPS reverse proxy. If using a reverse proxy, preserve `Host`, forward the correct scheme, and configure Uvicorn's trusted proxy addresses to match only that proxy. Do not publish plain HTTP credentials to the internet. The dashboard is a single-owner journal with a 30-day HTTP-only session cookie and rate-limited login. `.env` and runtime data are ignored by Git and excluded from Docker images.
 

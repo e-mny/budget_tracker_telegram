@@ -145,10 +145,14 @@ function renderBudget() {
   else insight = `You finished ${monthLabel(data.month)} with ${cash(data.remaining)} of your budget remaining.`;
   $('budget-body').innerHTML = `<div class="budget-content"><div class="budget-main"><strong>${cash(data.total)}</strong><span>of ${cash(data.budget)} budget</span></div><div class="progress-track" role="progressbar" aria-label="Monthly budget spent" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${Math.min(100,Math.round(percent))}" aria-valuetext="${Math.round(percent)} percent of budget spent"><div class="progress-fill ${over?'over':''}" style="width:${Math.min(100,percent)}%"></div></div><div class="budget-caption"><span>${Math.round(percent)}% spent</span><span>${cash(Math.abs(data.remaining))} ${over?'over budget':'remaining'}</span></div><div class="budget-insight ${over?'warn':''}"><b aria-hidden="true">${over?'!':'✦'}</b><span>${insight}</span></div></div>`;
 }
+function billingLabel(sub) {
+  const singular = {days:'day',weeks:'week',months:'month',years:'year'}[sub.interval_unit];
+  return sub.interval_count === 1 ? `Every ${singular}` : `Every ${sub.interval_count} ${sub.interval_unit}`;
+}
 function renderSubscriptions() {
-  $('subscription-list').innerHTML = data.subscriptions.map(sub => `<button class="subscription-row ${sub.active?'':'inactive'}" data-subscription="${sub.id}" aria-label="Edit subscription ${escapeHTML(sub.name)}"><span class="sub-icon">${escapeHTML(sub.name.slice(0,1).toUpperCase())}</span><span class="sub-copy"><strong>${escapeHTML(sub.name)}</strong><small>${sub.active ? `Day ${sub.billing_day} of each month` : 'Paused'}</small></span><span class="sub-amount">${cash(sub.amount)}</span></button>`).join('');
+  $('subscription-list').innerHTML = data.subscriptions.map(sub => `<button class="subscription-row ${sub.active?'':'inactive'}" data-subscription="${sub.id}" aria-label="Edit subscription ${escapeHTML(sub.name)}"><span class="sub-icon">${escapeHTML(sub.name.slice(0,1).toUpperCase())}</span><span class="sub-copy"><strong>${escapeHTML(sub.name)}</strong><small>${sub.active ? escapeHTML(billingLabel(sub)) : 'Paused'}</small></span><span class="sub-amount">${cash(sub.amount)} / ${escapeHTML(sub.interval_count === 1 ? ({days:'day',weeks:'week',months:'month',years:'year'}[sub.interval_unit]) : sub.interval_count + ' ' + sub.interval_unit)}</span></button>`).join('');
   $('subscription-total').textContent = cash(data.subscription_total) + ' / month';
-  $('annual-commitment').textContent = `Annual commitment at current rates: ${cash(data.annual_subscription_total)}. Next: ${data.upcoming_subscriptions.filter(s=>s.next_due).sort((a,b)=>a.next_due.localeCompare(b.next_due)).slice(0,1).map(s=>s.name+' · '+dateLabel(s.next_due)).join('') || 'No active renewals'}.`;
+  $('annual-commitment').textContent = `Estimated annual commitment: ${cash(data.annual_subscription_total)}. Next: ${data.upcoming_subscriptions.filter(s=>s.next_due).sort((a,b)=>a.next_due.localeCompare(b.next_due)).slice(0,1).map(s=>s.name+' · '+dateLabel(s.next_due)).join('') || 'No active renewals'}. Day/week estimates use a 365-day year.`;
   $('subscription-list').querySelectorAll('[data-subscription]').forEach(button => button.addEventListener('click', () => openSubscription(Number(button.dataset.subscription))));
 }
 function renderTransactions() {
@@ -199,7 +203,9 @@ function openSubscription(identifier=null) {
   $('subscription-title').textContent=sub?'Edit subscription':'Add subscription';
   $('subscription-name').value=sub?.name || '';
   $('subscription-amount').value=sub?(sub.amount/100).toFixed(2):'';
-  $('subscription-day').value=sub?.billing_day || 1;
+  $('subscription-interval').value=sub?.interval_count || 1;
+  $('subscription-unit').value=sub?.interval_unit || 'months';
+  $('subscription-start').value=sub?.start_date || data.today;
   $('subscription-active').checked=sub?Boolean(sub.active):true;
   $('subscription-error').textContent='';
   $('subscription-dialog').showModal();
@@ -247,7 +253,7 @@ $('budget-form').addEventListener('submit',event=>saveForm(event,'budget-error',
   $('budget-dialog').close();await refresh();toast('Monthly budget saved');
 }));
 $('subscription-form').addEventListener('submit',event=>saveForm(event,'subscription-error',async()=>{
-  const payload={name:$('subscription-name').value,amount:$('subscription-amount').value,billing_day:Number($('subscription-day').value),active:$('subscription-active').checked};
+  const payload={name:$('subscription-name').value,amount:$('subscription-amount').value,interval_count:Number($('subscription-interval').value),interval_unit:$('subscription-unit').value,start_date:$('subscription-start').value,active:$('subscription-active').checked};
   await api(editingSubscription?'/subscriptions/'+editingSubscription:'/subscriptions',editingSubscription?'PUT':'POST',payload);
   $('subscription-dialog').close();await refresh();toast('Subscription saved');
 }));

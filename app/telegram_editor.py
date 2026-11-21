@@ -71,7 +71,7 @@ class TelegramEditorMixin:
         if operation=='edit':text+='\n\nCurrently recorded:\n'+self.entry_text(expense_payload(payload['_before']))
         text+=f'\n\nDraft ID: {identifier}\nNothing changes until you confirm.'
         if operation=='delete' and payload['_before']['source']=='subscription':
-            text+=' This month’s charge will not be recreated; future subscription charges continue.'
+            text+=' This charge will not be recreated; future subscription charges continue.'
         keyboard=[{'text':'Confirm delete' if operation=='delete' else 'Confirm changes' if operation=='edit' else 'Confirm expense',
                    'callback_data':f'entry-confirm:{identifier}:{version}'}]
         if operation!='delete':keyboard.append({'text':'Edit','callback_data':f'entry-edit:{identifier}:{version}'})
