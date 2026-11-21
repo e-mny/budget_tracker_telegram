@@ -18,7 +18,7 @@ A private, self-hosted expense tracker with a desktop dashboard and a personal T
 - Monthly recurring subscriptions, auto-recorded on the billing day.
 - Billing days initially **1**, editable in the dashboard. Entries begin in the month the database is first created. No earlier expenses are invented.
 - A Telegram recap with a category chart at **23:59 on the last day of each month**, using **Asia/Singapore** time. Missed recaps are delivered after the worker comes back online.
-- Password-protected dashboard and a Telegram allowlist restricted to your private chat.
+- Password-protected dashboard and a Telegram allowlist for your private chat and one optional group, with owner-only commands.
 - SGD throughout. Amounts stored in integer cents, with no currency conversion or silent decimal rounding.
 
 ## Start on Proxmox
@@ -45,9 +45,36 @@ Open **http://SERVER-LAN-IP:8081** and sign in with that password. Set your budg
 2. Copy the new token into `TELEGRAM_BOT_TOKEN` in `.env` on the server.
 3. Set `TELEGRAM_ALLOWED_USER_ID` to your numeric personal Telegram user ID. If you already configured the ACL bot, reuse the **user ID**, not its token. The ACL bot's existing `/whoami` command can show your ID.
 4. Uncomment `COMPOSE_PROFILES=telegram` in `.env`.
-5. Run `docker compose up -d --build` again, then open the new bot's private chat and press **Start**. Telegram requires you to start the chat before the bot can send recaps.
+5. Run `docker compose up -d --build` again, then open the new bot's private chat and press **Start**. Telegram requires you to start the private chat before the bot can send you private messages.
 
-Only that user in a private chat can read or add expenses. Group chats and other senders are ignored. Polling is outbound only; the bot needs no public webhook or inbound port. Telegram credentials are passed only to the worker, not to the browser.
+Only the configured owner can read or add expenses, in their private chat or the one configured group. Other users, groups, channels, and anonymous group senders are ignored. Polling is outbound only; the bot needs no public webhook or inbound port. Telegram credentials are passed only to the worker, not to the browser.
+
+### Use Penny in a group
+
+1. Add the bot to your group. It needs permission to send text and photos; administrator access is not required.
+2. From your own Telegram account, send `/whoami@YourBotUsername` in that group. This owner-only setup command works before the group is allowlisted and returns only user/chat/topic IDs.
+3. Add the returned negative **Chat ID** to the server's existing `.env`, keeping your token and owner user ID:
+
+```dotenv
+TELEGRAM_ALLOWED_GROUP_ID=-1001234567890
+TELEGRAM_NOTIFICATION_CHAT=group
+# Optional: a forum topic ID from /whoami in that topic; 0 means general chat.
+TELEGRAM_NOTIFICATION_THREAD_ID=0
+```
+
+4. Recreate the Telegram worker to apply the environment changes. For the image deployment:
+
+```sh
+sudo docker compose -f compose.production.yaml up -d --no-build telegram
+```
+
+For a source build, use `docker compose up -d --build telegram`. Use `/add@YourBotUsername 6.50 food Lunch`, `/month@YourBotUsername`, and `/recap@YourBotUsername` in the group. Commands reply in the same group/topic, and private-chat commands continue to work. Only your configured owner account may issue commands or use receipt buttons; other group members can see the bot's group responses.
+
+Automatic recaps, budget alerts, and renewal reminders go to the configured group. `TELEGRAM_NOTIFICATION_CHAT=auto` (the default) chooses the group when `TELEGRAM_ALLOWED_GROUP_ID` is set and otherwise uses the owner's private chat. Set `private` to explicitly keep automatic messages private, or `group` to require a configured group. Scheduled group messages can use the optional notification topic; interactive replies always follow their incoming topic. Changing destination does not resend previously delivered alerts or recaps.
+
+Keep Telegram privacy mode enabled. Address commands with `@YourBotUsername` when multiple bots share the group. For receipts, **reply to a message from Penny with your photo/image document**; the bot ignores unrelated group photos and conversation. You can also use a `/receipt@YourBotUsername` image caption if Telegram delivers it. Receipt corrections and confirmation buttons must be used in the draft's original chat and topic; existing private receipt drafts stay private. If Telegram upgrades a basic group to a supergroup, run `/whoami` again and update its changed group ID.
+
+See [Telegram's group privacy rules](https://core.telegram.org/bots/features#privacy-mode).
 
 ### Bot commands
 
@@ -56,6 +83,7 @@ Only that user in a private chat can read or add expenses. Group chats and other
 | `/add 6.50 food Chicken rice` | Save a food expense today |
 | `/add 2.20 transport MRT` | Save a transport expense |
 | `/add 45 personal_care Haircut @2026-11-20` | Save a past-dated expense |
+| `/whoami` | Show your user, chat and topic IDs for setup |
 | `/categories` | List category names and descriptions |
 | `/month` | Current month total, categories, and remaining budget |
 | `/recap` | Send this month's recap and PNG chart now |
@@ -89,7 +117,10 @@ This tracks **recorded expenditure**, not bank account balances. Automatic charg
 | `TZ` | `Asia/Singapore`; used by both services for dates, recurring charges, and recaps |
 | `COOKIE_SECURE` | `false` for trusted LAN HTTP; set `true` when using HTTPS |
 | `TELEGRAM_BOT_TOKEN` | New bot's BotFather token |
-| `TELEGRAM_ALLOWED_USER_ID` | Numeric personal Telegram account ID |
+| `TELEGRAM_ALLOWED_USER_ID` | Numeric personal Telegram account ID; only this owner may use the ledger |
+| `TELEGRAM_ALLOWED_GROUP_ID` | Optional negative numeric group/supergroup ID; private access remains available |
+| `TELEGRAM_NOTIFICATION_CHAT` | `auto`: configured group if present, otherwise private; explicit `group` / `private` overrides |
+| `TELEGRAM_NOTIFICATION_THREAD_ID` | `0`; optional positive group topic ID for automatic messages |
 | `COMPOSE_PROFILES` | Set `telegram` to run the optional worker |
 | `DATA_DIR` | Local development only; Docker uses `/data` |
 
@@ -118,7 +149,7 @@ Tests use isolated temporary databases and a fixed calendar. They cover exact mo
 
 ## The added tools
 
-**Category budgets and notifications:** Set category limits from the category budget panel. Limits carry forward, and a blank limit removes it from the selected month onward. Limits are independent of the total monthly budget; their sum is not constrained to it. Notification settings control both total and category threshold alerts, reminder switches, and reminder lead time. Budget checks run after each Telegram poll. Thresholds send once per category/month; if spending crosses several at once, one message covers them. Late historical changes update the dashboard without sending old-month budget alerts. Notifications require the Telegram worker and a started private chat. As with recaps, a crash after Telegram accepts a message but before its local marker commits can rarely cause a duplicate.
+**Category budgets and notifications:** Set category limits from the category budget panel. Limits carry forward, and a blank limit removes it from the selected month onward. Limits are independent of the total monthly budget; their sum is not constrained to it. Notification settings control both total and category threshold alerts, reminder switches, and reminder lead time. Budget checks run after each Telegram poll. Thresholds send once per category/month; if spending crosses several at once, one message covers them. Late historical changes update the dashboard without sending old-month budget alerts. Notifications require the Telegram worker and either a started private chat or the configured group destination. As with recaps, a crash after Telegram accepts a message but before its local marker commits can rarely cause a duplicate.
 
 **CSV:** Use the Receipts & data panel to export this month or all records. Import UTF-8 CSV with `spent_on,amount,category,note,original_currency,original_amount` headers (the last three are optional). Dates are YYYY-MM-DD, and `amount` is the actual SGD charge. Maximum 2 MB / 5,000 rows. The preview validates every row before saving and shows the first 100; confirmation imports all valid file rows atomically. Exact matching records, including deleted records, are skipped; multiple identical rows in a new file retain their multiplicity. Exported descriptions are escaped against spreadsheet formulas and can be imported back. CSV exports contain expenses, not budgets, goals, settings, or passwords; use a volume backup for those.
 

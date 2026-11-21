@@ -67,7 +67,7 @@ sudo bash deploy/install-auto-update.sh "$PWD"
 sudo systemctl list-timers penny-update.timer
 ```
 
-Open **http://VM-LAN-IP:8081**. Configure subscription billing days and your budget. Press Start in the new bot's private chat. Keep only the Proxmox worker running with the live bot token.
+Open **http://VM-LAN-IP:8081**. Configure subscription billing days and your budget. Press Start in the new bot's private chat. For group use, follow the README: discover the negative chat ID with `/whoami@YourBotUsername`, then configure `TELEGRAM_ALLOWED_GROUP_ID` and `TELEGRAM_NOTIFICATION_CHAT=group`. An optional `TELEGRAM_NOTIFICATION_THREAD_ID` selects the automatic-message topic. Keep only the Proxmox worker running with the live bot token.
 
 ## Normal update flow
 
@@ -126,7 +126,8 @@ For local development or manual deployment, ordinary `compose.yaml` still suppor
 - Missing volume: confirm the existing container's `/data` mount. Never create a new volume merely to bypass the check on an existing deployment.
 - Unauthorized image pull: check root's GHCR login, package access and image visibility.
 - Missing manifest: wait for the first publish to finish and verify the image prefix/tag.
-- Bot has no replies: confirm the new token, personal numeric user ID, Telegram profile, and Start in private chat. Groups and other users are ignored.
+- Bot has no replies: confirm the new token, personal numeric user ID, Telegram profile, and Start in private chat. Only the configured owner is allowed; groups also require `TELEGRAM_ALLOWED_GROUP_ID`. Use `/whoami@YourBotUsername` to discover the group/topic IDs and address group commands to this bot. Receipt photos should be replies to a message from this bot.
+- Group changes not applied: recreate the Telegram worker after updating `.env`; GitHub image updates do not set your group ID. Keep privacy mode enabled and use addressed commands. If a group is upgraded to a supergroup, discover and configure its new ID.
 - Telegram polling conflict: stop the other worker using that same token.
 - Notifications missing: check worker logs, notification settings, timezone and internet access. Alerts need a configured budget; renewal reminders use the configured schedule, not bank data.
 - Wrong recurring charge: edit the recorded expense and the subscription's future settings separately.

@@ -1,4 +1,4 @@
-"""Private-chat Telegram worker. Shared SQLite ledger; outbound polling only."""
+"""Allowlisted private/group Telegram worker. Shared SQLite ledger; outbound polling only."""
 import logging
 import os
 import re
@@ -18,6 +18,7 @@ HELP = '''Penny · your expense ledger
 /add 6.50 food Chicken rice
 /add 2.20 transport MRT
 /add 45 personal_care Haircut @2026-11-20
+/whoami — show your user, chat and topic IDs
 /categories — available categories
 /month — spending and budget this month
 /recap — visual monthly summary
@@ -27,7 +28,9 @@ Send a receipt photo — extract fields for review
 /add 25 travel Lunch --original USD 18.50 — travel purchase
 /help — show these commands
 
-Amounts are SGD. Date is optional and uses Asia/Singapore by default. Each /add saves immediately; edit or delete mistakes in the dashboard. Automatic subscriptions are already included; do not log them twice.'''
+Amounts are SGD. Date is optional and uses Asia/Singapore by default. Each /add saves immediately; edit or delete mistakes in the dashboard. Automatic subscriptions are already included; do not log them twice.
+
+In groups, use /add@YourBot and /month@YourBot. Reply to one of this bot’s messages with a receipt photo to scan it. Only the configured owner can use the ledger.'''
 
 
 def summary_text(summary):
@@ -64,13 +67,31 @@ class TelegramError(Exception):
 
 
 class Bot:
-    def __init__(self, ledger, token, user_id, client=None):
+    def __init__(self, ledger, token, user_id, client=None, group_id=None, notification_chat='auto', notification_thread_id=0):
         if not token or not str(user_id).isdigit() or int(user_id) <= 0:
             raise ValueError('Set TELEGRAM_BOT_TOKEN and TELEGRAM_ALLOWED_USER_ID (positive numeric private user ID).')
         self.ledger = ledger
         self.token = token
         self.user_id = int(user_id)
+        self.group_id = None
+        if group_id is not None and str(group_id).strip():
+            if not re.fullmatch(r'-[1-9]\d*', str(group_id).strip()):
+                raise ValueError('TELEGRAM_ALLOWED_GROUP_ID must be a negative numeric group ID, or blank.')
+            self.group_id = int(str(group_id).strip())
+        if notification_chat not in ('auto', 'private', 'group'):
+            raise ValueError('TELEGRAM_NOTIFICATION_CHAT must be auto, private or group.')
+        if notification_chat == 'auto':
+            notification_chat = 'group' if self.group_id is not None else 'private'
+        if not re.fullmatch(r'0|[1-9]\d*', str(notification_thread_id)):
+            raise ValueError('TELEGRAM_NOTIFICATION_THREAD_ID must be zero or a positive numeric topic ID.')
+        self.notification_chat = notification_chat
+        self.notification_thread_id = int(notification_thread_id)
+        if notification_chat == 'group' and self.group_id is None:
+            raise ValueError('Set TELEGRAM_ALLOWED_GROUP_ID before sending automatic notifications to a group.')
+        if self.notification_thread_id and notification_chat != 'group':
+            raise ValueError('A notification topic requires TELEGRAM_NOTIFICATION_CHAT=group.')
         self.username = ''
+        self.bot_id = None
         self.client = client or httpx.Client(timeout=45)
         self.running = True
 
@@ -88,17 +109,53 @@ class Bot:
             # HTTP exception strings contain the credential-bearing Telegram URL. Never log them.
             raise TelegramError('Telegram connection failed.') from None
 
-    def send(self, text):
-        return self.telegram('sendMessage', chat_id=self.user_id, text=text)
+    def allowed(self, user, chat):
+        return user.get('id') == self.user_id and (
+            (chat.get('type') == 'private' and chat.get('id') == self.user_id) or
+            (self.group_id is not None and chat.get('type') in ('group', 'supergroup') and chat.get('id') == self.group_id))
 
-    def send_recap(self, month):
+    def destination(self, message):
+        chat_id = message['chat']['id']
+        thread_id = message.get('message_thread_id', 0)
+        return {} if chat_id == self.user_id and not thread_id else {'chat_id': chat_id, 'thread_id': thread_id}
+
+    def notification_destination(self):
+        return {'chat_id': self.group_id, 'thread_id': self.notification_thread_id} if self.notification_chat == 'group' else {}
+
+    def command(self, text):
+        match = re.match(r'^/([a-z_]+)(?:@([a-zA-Z0-9_]+))?(?:\s+([\s\S]*))?$', text, re.I)
+        if not match:
+            return None, '', False
+        name, address, args = match.groups()
+        if address and address.lower() != self.username.lower():
+            return 'other_bot', '', True
+        return name.lower(), args or '', bool(address)
+
+    def replying_to_me(self, message):
+        return self.bot_id is not None and message.get('reply_to_message', {}).get('from', {}).get('id') == self.bot_id
+
+    def check_receipt_context(self, draft, message):
+        payload = draft['payload']
+        expected = (payload.get('_telegram_chat_id', self.user_id), payload.get('_telegram_thread_id', 0))
+        actual = (message['chat']['id'], message.get('message_thread_id', 0))
+        if expected != actual:
+            raise ValueError('Open this receipt draft in its original chat and topic.')
+
+    def send(self, text, *, chat_id=None, thread_id=0):
+        payload = {'chat_id': self.user_id if chat_id is None else chat_id, 'text': text}
+        if thread_id:
+            payload['message_thread_id'] = thread_id
+        return self.telegram('sendMessage', **payload)
+
+    def send_recap(self, month, *, chat_id=None, thread_id=0):
         summary = self.ledger.summary(month)
         content = render_summary(summary)
-        # A single photo+caption is one API call, avoiding a half-sent text/chart pair.
-        self.telegram('sendPhoto', files={'photo': ('monthly-recap.png', content, 'image/png')},
-                      chat_id=self.user_id, caption=summary_text(summary))
+        payload = {'chat_id': self.user_id if chat_id is None else chat_id, 'caption': summary_text(summary)}
+        if thread_id:
+            payload['message_thread_id'] = thread_id
+        self.telegram('sendPhoto', files={'photo': ('monthly-recap.png', content, 'image/png')}, **payload)
 
-    def receipt_preview(self, identifier):
+    def receipt_preview(self, identifier, *, chat_id=None, thread_id=0):
         draft = self.ledger.draft(identifier, 'receipt')
         payload = draft['payload']
         valid = True
@@ -120,7 +177,10 @@ class Bot:
             keyboard.append({'text':'Save receipt','callback_data':'receipt-save:'+identifier})
         if draft['status'] == 'pending':
             keyboard.append({'text':'Cancel','callback_data':'receipt-cancel:'+identifier})
-        self.telegram('sendMessage', chat_id=self.user_id, text='\n'.join(lines),
+        destination = {'chat_id': self.user_id if chat_id is None else chat_id}
+        if thread_id:
+            destination['message_thread_id'] = thread_id
+        self.telegram('sendMessage', **destination, text='\n'.join(lines),
                       reply_markup={'inline_keyboard':[keyboard]} if keyboard else {'inline_keyboard':[]})
 
     def receive_receipt(self, update_id, message):
@@ -152,61 +212,85 @@ class Bot:
             from .core import today
             if payload['spent_on'] == today().isoformat():
                 payload['spent_on'] = datetime.fromtimestamp(message['date'], ZONE).date().isoformat()
+        payload.update(_telegram_chat_id=message['chat']['id'], _telegram_thread_id=message.get('message_thread_id', 0))
         identifier = self.ledger.new_draft('receipt', payload, f'receipt-upload:{self.user_id}:{update_id}')
-        self.receipt_preview(identifier)
+        self.receipt_preview(identifier, **self.destination(message))
 
     def process_callback(self, callback):
         message = callback.get('message', {})
-        if callback.get('from', {}).get('id') != self.user_id or message.get('chat', {}).get('id') != self.user_id or message.get('chat', {}).get('type') != 'private':
+        if not self.allowed(callback.get('from', {}), message.get('chat', {})):
+            return
+        action, _, identifier = callback.get('data', '').partition(':')
+        if action not in ('receipt-save', 'receipt-cancel'):
             return
         self.telegram('answerCallbackQuery', callback_query_id=callback['id'])
-        action, _, identifier = callback.get('data', '').partition(':')
+        def reply(text):
+            return self.send(text, **self.destination(message))
         try:
             if action == 'receipt-save':
                 draft = self.ledger.draft(identifier, 'receipt')
+                self.check_receipt_context(draft, message)
                 row = self.ledger.confirm_receipt(identifier, draft['payload'])
-                self.send(f'Saved receipt #{row["id"]} · {money(row["amount"])}. Edit any mistakes in the dashboard.')
+                reply(f'Saved receipt #{row["id"]} · {money(row["amount"])}. Edit any mistakes in the dashboard.')
             elif action == 'receipt-cancel':
+                draft = self.ledger.draft(identifier, 'receipt')
+                self.check_receipt_context(draft, message)
                 self.ledger.cancel_draft(identifier)
-                self.send('Receipt draft cancelled.')
+                reply('Receipt draft cancelled.')
         except (ValueError, LookupError) as error:
-            self.send(str(error))
+            reply(str(error))
 
     def process_update(self, update):
         if 'callback_query' in update:
             return self.process_callback(update['callback_query'])
         message = update.get('message', {})
-        if (message.get('from', {}).get('id') != self.user_id or
-            message.get('chat', {}).get('id') != self.user_id or
-            message.get('chat', {}).get('type') != 'private'):
+        user, chat = message.get('from', {}), message.get('chat', {})
+        if user.get('id') != self.user_id or message.get('sender_chat'):
             return
+        command, args, addressed = self.command(message.get('text') or message.get('caption', ''))
+        if command == 'other_bot':
+            return
+        # Discovery exposes IDs only, so the owner can configure a group before allowlisting it.
+        discovery_chat = (chat.get('type') == 'private' and chat.get('id') == self.user_id) or (
+            chat.get('type') in ('group', 'supergroup') and type(chat.get('id')) is int and chat['id'] < 0)
+        if command == 'whoami' and discovery_chat:
+            self.send(f'Your user ID: {self.user_id}\nChat ID: {chat["id"]}\nTopic ID: {message.get("message_thread_id", 0)}', **self.destination(message))
+            return
+        if not self.allowed(user, chat):
+            return
+        is_group = chat['type'] in ('group', 'supergroup')
+        if is_group:
+            replying = message.get('reply_to_message', {}).get('from', {})
+            if not addressed and replying.get('is_bot') and not self.replying_to_me(message):
+                return
+        def reply(text):
+            return self.send(text, **self.destination(message))
         if message.get('photo') or message.get('document'):
+            if is_group and not (self.replying_to_me(message) or (command == 'receipt' and not args.strip())):
+                return
             try:
                 self.receive_receipt(update['update_id'], message)
             except (ValueError, LookupError) as error:
-                self.send(str(error))
+                reply(str(error))
             return
-        text = message.get('text', '')
-        match = re.match(r'^/([a-z_]+)(?:@([a-zA-Z0-9_]+))?(?:\s+([\s\S]*))?$', text)
-        if not match:
-            self.send('Use /add 6.50 food Lunch to log an expense, or /help for commands.')
+        if command is None:
+            if not is_group:
+                reply('Use /add 6.50 food Lunch to log an expense, or /help for commands.')
             return
-        command, address, args = match.groups()
-        if address and address.lower() != self.username.lower():
+        if is_group and command not in ('start', 'help', 'categories', 'add', 'receipt', 'month', 'recap') and not addressed:
             return
-        args = args or ''
         try:
             if command in ('start', 'help'):
-                self.send(HELP)
+                reply(HELP)
             elif command == 'categories':
-                self.send('Categories (use the name before the colon):\n\n' + '\n'.join(f'{key}: {label}' for key, (label, _) in CATEGORIES.items()))
+                reply('Categories (use the name before the colon):\n\n' + '\n'.join(f'{key}: {label}' for key, (label, _) in CATEGORIES.items()))
             elif command == 'add':
                 # Telegram timestamps keep an update received after midnight in its original month.
                 local_date = datetime.fromtimestamp(message['date'], ZONE).date() if message.get('date') else None
                 row = self.ledger.add_expense(parse_add(args, as_of=local_date), source='telegram',
                                                source_key=f"telegram:{self.user_id}:{update['update_id']}")
                 state = self.ledger.summary(row['spent_on'][:7])
-                self.send(f"Saved #{row['id']} · {money(row['amount'])} · {CATEGORIES[row['category']][0]}\n"
+                reply(f"Saved #{row['id']} · {money(row['amount'])} · {CATEGORIES[row['category']][0]}\n"
                           f"{row['note'] or 'No description'} · {row['spent_on']}\nMonth total: {money(state['total'])}\n"
                           + (f"Budget remaining: {money(state['remaining'])}" if state['budget'] else 'Set your monthly budget in the dashboard.'))
             elif command == 'receipt':
@@ -214,6 +298,7 @@ class Bot:
                 if not separator:
                     raise ValueError('Send a receipt photo, then use /receipt DRAFT_ID 12.50 food Merchant to correct its fields before saving.')
                 draft = self.ledger.draft(identifier, 'receipt')
+                self.check_receipt_context(draft, message)
                 if draft['status'] != 'pending':
                     raise ValueError('This receipt draft has already been saved or cancelled.')
                 payload = parse_add(corrected)
@@ -223,15 +308,15 @@ class Bot:
                 import json
                 with self.ledger.db() as db:
                     db.execute("UPDATE drafts SET payload=? WHERE id=? AND status='pending'",(json.dumps(revised), identifier))
-                self.receipt_preview(identifier)
+                self.receipt_preview(identifier, **self.destination(message))
             elif command == 'month':
-                self.send(summary_text(self.ledger.summary()))
+                reply(summary_text(self.ledger.summary()))
             elif command == 'recap':
-                self.send_recap(args.strip() or datetime.now(ZONE).strftime('%Y-%m'))
+                self.send_recap(args.strip() or datetime.now(ZONE).strftime('%Y-%m'), **self.destination(message))
             else:
-                self.send('Unknown command. Use /help to see the available commands.')
+                reply('Unknown command. Use /help to see the available commands.')
         except (ValueError, LookupError) as error:
-            self.send(str(error))
+            reply(str(error))
 
     def tick(self, now=None):
         now = (now or datetime.now(ZONE)).astimezone(ZONE)
@@ -240,12 +325,12 @@ class Bot:
             start = db.execute("SELECT value FROM meta WHERE key='start_month'").fetchone()['value']
             sent = {row['month'] for row in db.execute('SELECT month FROM recaps')}
         for notification in self.ledger.pending_notifications(now):
-            self.send(notification['text'])
+            self.send(notification['text'], **self.notification_destination())
             self.ledger.mark_notification(notification['keys'], now)
         for month in due_recaps(now, start):
             if month in sent:
                 continue
-            self.send_recap(month)
+            self.send_recap(month, **self.notification_destination())
             with self.ledger.db() as db:
                 db.execute('INSERT OR IGNORE INTO recaps VALUES (?,?)', (month, now.isoformat()))
 
@@ -258,10 +343,11 @@ class Bot:
         while self.running:
             try:
                 if not self.username:
-                    self.username = self.telegram('getMe')['username']
+                    identity = self.telegram('getMe')
+                    self.username, self.bot_id = identity['username'], identity['id']
                     self.telegram('setMyCommands', commands=[{'command': c, 'description': d} for c, d in [
                         ('add', 'Log an expense: /add 6.50 food Lunch'), ('month', 'Current month spending and budget'),
-                        ('recap', 'Visual monthly summary'), ('receipt', 'Correct a receipt draft before saving'), ('categories', 'Available expense categories'), ('help', 'How to use Penny')]])
+                        ('recap', 'Visual monthly summary'), ('receipt', 'Correct a receipt draft before saving'), ('categories', 'Available expense categories'), ('help', 'How to use Penny'), ('whoami', 'Show user, chat, and topic IDs')]])
                 updates = self.telegram('getUpdates', offset=int(self.ledger.get_state('offset', '0')),
                                         timeout=20, allowed_updates=['message', 'callback_query'])
                 for update in updates:
@@ -290,7 +376,10 @@ def main():
     logging.basicConfig(level=logging.INFO, format='%(levelname)s %(name)s: %(message)s')
     logging.getLogger('httpx').setLevel(logging.WARNING)
     try:
-        bot = Bot(Ledger(), os.getenv('TELEGRAM_BOT_TOKEN', ''), os.getenv('TELEGRAM_ALLOWED_USER_ID', ''))
+        bot = Bot(Ledger(), os.getenv('TELEGRAM_BOT_TOKEN', ''), os.getenv('TELEGRAM_ALLOWED_USER_ID', ''),
+                  group_id=os.getenv('TELEGRAM_ALLOWED_GROUP_ID') or None,
+                  notification_chat=os.getenv('TELEGRAM_NOTIFICATION_CHAT', 'auto') or 'auto',
+                  notification_thread_id=os.getenv('TELEGRAM_NOTIFICATION_THREAD_ID', '0'))
     except ValueError as error:
         raise SystemExit(str(error)) from None
     bot.run()
