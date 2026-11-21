@@ -7,7 +7,7 @@ A private, self-hosted expense tracker with a desktop dashboard and a personal T
 - Visual dashboard: category donut, daily/cumulative spending chart, totals, budget remaining, and searchable transactions.
 - Set a monthly budget yourself. No suggested or prefilled budget. A saved budget carries forward until a later month's budget replaces it; earlier months retain their previous budget.
 - Add, edit, and delete expenses in the dashboard, or submit categorized expenses through Telegram.
-- Monthly recurring subscriptions, auto-recorded on the billing day: **gym S$98**, **phone S$10.10**, **Netflix S$16**. Total **S$124.10/month**.
+- Monthly recurring subscriptions, auto-recorded on the billing day.
 - Billing days initially **1**, editable in the dashboard. Entries begin in the month the database is first created. No earlier expenses are invented.
 - A Telegram recap with a category chart at **23:59 on the last day of each month**, using **Asia/Singapore** time. Missed recaps are delivered after the worker comes back online.
 - Password-protected dashboard and a Telegram allowlist restricted to your private chat.
@@ -105,6 +105,5 @@ docker compose config --quiet
 
 Tests use isolated temporary databases and a fixed calendar. They cover exact money, date validation, monthly budgets, recurrence and shorter months, duplicate protection, recap schedules and retries, chart generation, Telegram restrictions, authentication, and expense editing.
 
-[Feature ideas awaiting your review](docs/suggestions.md) are deliberately not implemented.
 
 Implementation references: [Telegram Bot API](https://core.telegram.org/bots/api), [FastAPI security](https://fastapi.tiangolo.com/tutorial/security/), and [SQLite WAL](https://sqlite.org/wal.html).
