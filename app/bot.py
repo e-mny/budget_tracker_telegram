@@ -10,6 +10,7 @@ import httpx
 
 from .core import CATEGORIES, Ledger, ZONE, money, month_bounds, parse_add
 from .graphs import render_summary
+from .receipts import MAX_RECEIPT, extract_receipt
 
 log = logging.getLogger('penny-bot')
 HELP = '''Penny · your expense ledger
@@ -21,6 +22,9 @@ HELP = '''Penny · your expense ledger
 /month — spending and budget this month
 /recap — visual monthly summary
 /recap YYYY-MM — a previous month
+/receipt ID 12.50 food Lunch — revise a receipt draft
+Send a receipt photo — extract fields for review
+/add 25 travel Lunch --original USD 18.50 — travel purchase
 /help — show these commands
 
 Amounts are SGD. Date is optional and uses Asia/Singapore by default. Each /add saves immediately; edit or delete mistakes in the dashboard. Automatic subscriptions are already included; do not log them twice.'''
@@ -94,11 +98,93 @@ class Bot:
         self.telegram('sendPhoto', files={'photo': ('monthly-recap.png', content, 'image/png')},
                       chat_id=self.user_id, caption=summary_text(summary))
 
+    def receipt_preview(self, identifier):
+        draft = self.ledger.draft(identifier, 'receipt')
+        payload = draft['payload']
+        valid = True
+        try:
+            self.ledger.validate_expense(payload)
+        except ValueError:
+            valid = False
+        lines = [f'Receipt draft {identifier} · {draft["status"]}',
+                 f'Merchant: {payload.get("note") or "Not detected"}',
+                 f'SGD amount: {payload.get("amount") or "Enter the SGD amount charged"}',
+                 f'Category: {payload.get("category", "other")}', f'Date: {payload.get("spent_on")}',
+                 payload.get('warning', 'Review all fields before saving.')]
+        if payload.get('original_currency'):
+            lines.append(f'Original: {payload["original_currency"]} {payload.get("original_amount") or "Enter original amount"}')
+        lines.append(f'To correct: /receipt {identifier} 12.50 food Merchant @YYYY-MM-DD')
+        lines.append('For foreign purchases append: --original USD 10.00')
+        keyboard = []
+        if valid and draft['status'] == 'pending':
+            keyboard.append({'text':'Save receipt','callback_data':'receipt-save:'+identifier})
+        if draft['status'] == 'pending':
+            keyboard.append({'text':'Cancel','callback_data':'receipt-cancel:'+identifier})
+        self.telegram('sendMessage', chat_id=self.user_id, text='\n'.join(lines),
+                      reply_markup={'inline_keyboard':[keyboard]} if keyboard else {'inline_keyboard':[]})
+
+    def receive_receipt(self, update_id, message):
+        photos = message.get('photo') or []
+        document = message.get('document')
+        photo = photos[-1] if photos else document
+        if not photo or (document and document.get('mime_type') not in ('image/jpeg','image/png','image/webp')):
+            raise ValueError('Send the receipt as a JPG, PNG or WebP photo or image document.')
+        if photo.get('file_size', 0) > MAX_RECEIPT:
+            raise ValueError('Receipt images must be at most 10 MB.')
+        remote = self.telegram('getFile', file_id=photo['file_id'])
+        file_path = remote.get('file_path', '')
+        if not re.fullmatch(r'[A-Za-z0-9_./-]+', file_path) or '..' in file_path:
+            raise TelegramError('Invalid Telegram file path.')
+        content = bytearray()
+        try:
+            with self.client.stream('GET', f'https://api.telegram.org/file/bot{self.token}/{file_path}') as response:
+                if not response.is_success:
+                    raise TelegramError('Could not download receipt.')
+                for chunk in response.iter_bytes():
+                    content.extend(chunk)
+                    if len(content) > MAX_RECEIPT:
+                        raise ValueError('Receipt images must be at most 10 MB.')
+        except httpx.HTTPError:
+            raise TelegramError('Receipt download failed.') from None
+        payload = extract_receipt(bytes(content))
+        if message.get('date'):
+            # If OCR did not identify a date, preserve the date of a delayed upload.
+            from .core import today
+            if payload['spent_on'] == today().isoformat():
+                payload['spent_on'] = datetime.fromtimestamp(message['date'], ZONE).date().isoformat()
+        identifier = self.ledger.new_draft('receipt', payload, f'receipt-upload:{self.user_id}:{update_id}')
+        self.receipt_preview(identifier)
+
+    def process_callback(self, callback):
+        message = callback.get('message', {})
+        if callback.get('from', {}).get('id') != self.user_id or message.get('chat', {}).get('id') != self.user_id or message.get('chat', {}).get('type') != 'private':
+            return
+        self.telegram('answerCallbackQuery', callback_query_id=callback['id'])
+        action, _, identifier = callback.get('data', '').partition(':')
+        try:
+            if action == 'receipt-save':
+                draft = self.ledger.draft(identifier, 'receipt')
+                row = self.ledger.confirm_receipt(identifier, draft['payload'])
+                self.send(f'Saved receipt #{row["id"]} · {money(row["amount"])}. Edit any mistakes in the dashboard.')
+            elif action == 'receipt-cancel':
+                self.ledger.cancel_draft(identifier)
+                self.send('Receipt draft cancelled.')
+        except (ValueError, LookupError) as error:
+            self.send(str(error))
+
     def process_update(self, update):
+        if 'callback_query' in update:
+            return self.process_callback(update['callback_query'])
         message = update.get('message', {})
         if (message.get('from', {}).get('id') != self.user_id or
             message.get('chat', {}).get('id') != self.user_id or
             message.get('chat', {}).get('type') != 'private'):
+            return
+        if message.get('photo') or message.get('document'):
+            try:
+                self.receive_receipt(update['update_id'], message)
+            except (ValueError, LookupError) as error:
+                self.send(str(error))
             return
         text = message.get('text', '')
         match = re.match(r'^/([a-z_]+)(?:@([a-zA-Z0-9_]+))?(?:\s+([\s\S]*))?$', text)
@@ -123,13 +209,28 @@ class Bot:
                 self.send(f"Saved #{row['id']} · {money(row['amount'])} · {CATEGORIES[row['category']][0]}\n"
                           f"{row['note'] or 'No description'} · {row['spent_on']}\nMonth total: {money(state['total'])}\n"
                           + (f"Budget remaining: {money(state['remaining'])}" if state['budget'] else 'Set your monthly budget in the dashboard.'))
+            elif command == 'receipt':
+                identifier, separator, corrected = args.strip().partition(' ')
+                if not separator:
+                    raise ValueError('Send a receipt photo, then use /receipt DRAFT_ID 12.50 food Merchant to correct its fields before saving.')
+                draft = self.ledger.draft(identifier, 'receipt')
+                if draft['status'] != 'pending':
+                    raise ValueError('This receipt draft has already been saved or cancelled.')
+                payload = parse_add(corrected)
+                self.ledger.validate_expense(payload)
+                revised = {**draft['payload'], **payload,
+                           'original_currency': payload.get('original_currency'), 'original_amount': payload.get('original_amount')}
+                import json
+                with self.ledger.db() as db:
+                    db.execute("UPDATE drafts SET payload=? WHERE id=? AND status='pending'",(json.dumps(revised), identifier))
+                self.receipt_preview(identifier)
             elif command == 'month':
                 self.send(summary_text(self.ledger.summary()))
             elif command == 'recap':
                 self.send_recap(args.strip() or datetime.now(ZONE).strftime('%Y-%m'))
             else:
                 self.send('Unknown command. Use /help to see the available commands.')
-        except ValueError as error:
+        except (ValueError, LookupError) as error:
             self.send(str(error))
 
     def tick(self, now=None):
@@ -138,6 +239,9 @@ class Bot:
         with self.ledger.db() as db:
             start = db.execute("SELECT value FROM meta WHERE key='start_month'").fetchone()['value']
             sent = {row['month'] for row in db.execute('SELECT month FROM recaps')}
+        for notification in self.ledger.pending_notifications(now):
+            self.send(notification['text'])
+            self.ledger.mark_notification(notification['keys'], now)
         for month in due_recaps(now, start):
             if month in sent:
                 continue
@@ -157,9 +261,9 @@ class Bot:
                     self.username = self.telegram('getMe')['username']
                     self.telegram('setMyCommands', commands=[{'command': c, 'description': d} for c, d in [
                         ('add', 'Log an expense: /add 6.50 food Lunch'), ('month', 'Current month spending and budget'),
-                        ('recap', 'Visual monthly summary'), ('categories', 'Available expense categories'), ('help', 'How to use Penny')]])
+                        ('recap', 'Visual monthly summary'), ('receipt', 'Correct a receipt draft before saving'), ('categories', 'Available expense categories'), ('help', 'How to use Penny')]])
                 updates = self.telegram('getUpdates', offset=int(self.ledger.get_state('offset', '0')),
-                                        timeout=20, allowed_updates=['message'])
+                                        timeout=20, allowed_updates=['message', 'callback_query'])
                 for update in updates:
                     self.process_update(update)
                     self.ledger.set_state('offset', update['update_id'] + 1)

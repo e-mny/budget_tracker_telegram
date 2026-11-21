@@ -151,6 +151,7 @@ def test_bot_allowlist_duplicate_updates_and_recap_delivery(ledger, monkeypatch)
 
 def test_failed_recap_is_retried(ledger, monkeypatch):
     bot=Bot(ledger,'test-token',123)
+    monkeypatch.setattr(bot,'send',lambda text: None)
     def fail(month):
         raise TelegramError('unavailable')
     monkeypatch.setattr(bot,'send_recap',fail)
@@ -158,6 +159,7 @@ def test_failed_recap_is_retried(ledger, monkeypatch):
         bot.tick(datetime(2026,11,30,23,59,tzinfo=ZONE))
     recaps=[]
     monkeypatch.setattr(bot,'send_recap',recaps.append)
+    monkeypatch.setattr(core,'today',lambda: date(2026,12,1))
     bot.tick(datetime(2026,12,1,1,tzinfo=ZONE))
     assert recaps == ['2026-11']
 

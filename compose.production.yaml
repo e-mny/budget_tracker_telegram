@@ -1,0 +1,42 @@
+name: ${COMPOSE_PROJECT_NAME:-money-tracker}
+x-common: &common
+  image: "${IMAGE_REPOSITORY:-ghcr.io/e-mny/budget_tracker_telegram}:${IMAGE_TAG:-latest}"
+  restart: unless-stopped
+  read_only: true
+  tmpfs:
+    - /tmp:size=128m,mode=1777
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+  volumes:
+    - money_data:/data
+  stop_grace_period: 40s
+services:
+  dashboard:
+    <<: *common
+    ports:
+      - "${BIND_ADDRESS:-0.0.0.0}:${PORT:-8081}:8000"
+    environment:
+      DASHBOARD_PASSWORD: "${DASHBOARD_PASSWORD:?Set DASHBOARD_PASSWORD in .env (12+ characters)}"
+      COOKIE_SECURE: "${COOKIE_SECURE:-false}"
+      TZ: "${TZ:-Asia/Singapore}"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=5)"]
+      interval: 30s
+      timeout: 6s
+      retries: 3
+      start_period: 15s
+  telegram:
+    <<: *common
+    profiles: [telegram]
+    command: ["python", "-m", "app.bot"]
+    environment:
+      TELEGRAM_BOT_TOKEN: "${TELEGRAM_BOT_TOKEN:-}"
+      TELEGRAM_ALLOWED_USER_ID: "${TELEGRAM_ALLOWED_USER_ID:-}"
+      TZ: "${TZ:-Asia/Singapore}"
+    depends_on:
+      dashboard:
+        condition: service_healthy
+volumes:
+  money_data:
+    external: true
+    name: "${MONEY_DATA_VOLUME:?Set MONEY_DATA_VOLUME to your existing expense data volume}"

@@ -4,6 +4,7 @@ const cash = cents => new Intl.NumberFormat('en-SG', {style:'currency',currency:
 const escapeHTML = value => String(value).replace(/[&<>"']/g, char => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));
 const monthLabel = month => new Date(month + '-01T12:00:00').toLocaleDateString('en-SG', {month:'long',year:'numeric'});
 const dateLabel = date => new Date(date + 'T12:00:00').toLocaleDateString('en-SG', {day:'2-digit',month:'short'});
+let receiptDraft=null, csvDraft=null, editingGoal=null, contributingGoal=null, contributionKey=null;
 let data, chartMode = 'daily', editingExpense = null, editingSubscription = null, refreshSequence = 0, toastTimer;
 
 async function api(path, method='GET', body) {
@@ -79,7 +80,7 @@ function render() {
   $('filter-category').value = previousFilter;
   $('expense-category').innerHTML = options;
   $('data-note').textContent = `SGD · ${data.timezone} · Recorded expenses only`;
-  renderCategories(); renderTrend(); renderBudget(); renderSubscriptions(); renderTransactions();
+  renderCategories(); renderTrend(); renderBudget(); renderSubscriptions(); renderTransactions(); renderFeatures();
 }
 function renderCategories() {
   const categories = data.categories.filter(cat => cat.amount > 0).sort((a,b) => b.amount - a.amount);
@@ -147,6 +148,7 @@ function renderBudget() {
 function renderSubscriptions() {
   $('subscription-list').innerHTML = data.subscriptions.map(sub => `<button class="subscription-row ${sub.active?'':'inactive'}" data-subscription="${sub.id}" aria-label="Edit subscription ${escapeHTML(sub.name)}"><span class="sub-icon">${escapeHTML(sub.name.slice(0,1).toUpperCase())}</span><span class="sub-copy"><strong>${escapeHTML(sub.name)}</strong><small>${sub.active ? `Day ${sub.billing_day} of each month` : 'Paused'}</small></span><span class="sub-amount">${cash(sub.amount)}</span></button>`).join('');
   $('subscription-total').textContent = cash(data.subscription_total) + ' / month';
+  $('annual-commitment').textContent = `Annual commitment at current rates: ${cash(data.annual_subscription_total)}. Next: ${data.upcoming_subscriptions.filter(s=>s.next_due).sort((a,b)=>a.next_due.localeCompare(b.next_due)).slice(0,1).map(s=>s.name+' · '+dateLabel(s.next_due)).join('') || 'No active renewals'}.`;
   $('subscription-list').querySelectorAll('[data-subscription]').forEach(button => button.addEventListener('click', () => openSubscription(Number(button.dataset.subscription))));
 }
 function renderTransactions() {
@@ -156,8 +158,8 @@ function renderTransactions() {
   $('transaction-count').textContent = `${rows.length} of ${data.count} expense${data.count===1?'':'s'} · ${monthLabel(data.month)}`;
   $('transaction-rows').innerHTML = rows.map(row => {
     const cat=data.categories.find(c=>c.id===row.category);
-    const source=({'telegram':'Telegram','subscription':'Auto-recorded','dashboard':'Dashboard'})[row.source] || 'Dashboard';
-    return `<tr><td>${dateLabel(row.spent_on)}</td><td title="${escapeHTML(row.note)}">${escapeHTML(row.note || cat.label)}</td><td><span class="category-pill" style="--pill-bg:${cat.color}16;--pill-color:${cat.color}"><i class="legend-dot" style="background:${cat.color}"></i>${escapeHTML(cat.label)}</span></td><td><span class="source-tag">${source}</span></td><td class="amount-cell">${cash(row.amount)}</td><td><button class="edit-expense" data-expense="${row.id}" aria-label="Edit ${escapeHTML(row.note || cat.label)}">✎</button></td></tr>`;
+    const source=({'telegram':'Telegram','subscription':'Auto-recorded','dashboard':'Dashboard','csv':'CSV import','receipt':'Receipt'})[row.source] || 'Dashboard';
+    return `<tr><td>${dateLabel(row.spent_on)}</td><td title="${escapeHTML(row.note)}">${escapeHTML(row.note || cat.label)}</td><td><span class="category-pill" style="--pill-bg:${cat.color}16;--pill-color:${cat.color}"><i class="legend-dot" style="background:${cat.color}"></i>${escapeHTML(cat.label)}</span></td><td><span class="source-tag">${source}</span></td><td class="amount-cell">${cash(row.amount)}${row.original_currency?`<span class="original-value">${escapeHTML(row.original_currency)} ${escapeHTML(row.original_amount)}</span>`:""}</td><td><button class="edit-expense" data-expense="${row.id}" aria-label="Edit ${escapeHTML(row.note || cat.label)}">✎</button></td></tr>`;
   }).join('');
   $('table-empty').hidden = rows.length>0;
   $('table-empty').textContent = data.count ? 'No expenses match your filters.' : 'Nothing recorded yet. Add your first expense here or send /add on Telegram.';
@@ -166,6 +168,8 @@ function renderTransactions() {
 function openExpense(identifier=null) {
   if (!data) return;
   editingExpense=identifier;
+  receiptDraft=null;
+  $('receipt-review').hidden=true;
   const row=data.expenses.find(row=>row.id===identifier);
   $('expense-form').reset();
   $('expense-title').textContent = row ? 'Edit expense' : 'Add an expense';
@@ -173,6 +177,10 @@ function openExpense(identifier=null) {
   $('expense-category').value = row?.category || 'food';
   $('expense-date').value = row?.spent_on || data.today;
   $('expense-note').value = row?.note || '';
+  $('expense-currency').innerHTML = '<option value="">None · SGD only</option>' + data.currencies.map(code=>`<option value="${code}">${code}</option>`).join('');
+  $('expense-currency').value=row?.original_currency || '';
+  $('expense-original').value=row?.original_amount || '';
+  $('currency-details').open=Boolean(row?.original_currency);
   $('delete-expense').hidden = !row;
   $('expense-error').textContent = '';
   $('expense-dialog').showModal();
@@ -227,8 +235,9 @@ document.querySelectorAll('[data-nav]').forEach(link=>link.addEventListener('cli
   document.querySelectorAll('[data-nav]').forEach(l=>l.classList.toggle('active',l===link));
 }));
 $('expense-form').addEventListener('submit',event=>saveForm(event,'expense-error',async()=>{
-  const payload={amount:$('expense-amount').value,category:$('expense-category').value,spent_on:$('expense-date').value,note:$('expense-note').value};
-  await api(editingExpense?'/expenses/'+editingExpense:'/expenses',editingExpense?'PUT':'POST',payload);
+  const payload={amount:$('expense-amount').value,category:$('expense-category').value,spent_on:$('expense-date').value,note:$('expense-note').value,original_currency:$('expense-currency').value || null,original_amount:$('expense-currency').value ? $('expense-original').value : null};
+  await api(receiptDraft?'/receipts/'+receiptDraft+'/confirm':editingExpense?'/expenses/'+editingExpense:'/expenses',editingExpense?'PUT':'POST',payload);
+  receiptDraft=null;
   $('expense-dialog').close();
   await refresh();
   toast('Expense saved');
@@ -260,4 +269,140 @@ $('confirm-delete').addEventListener('click',async()=>{
 document.addEventListener('visibilitychange',()=>{
   if(!document.hidden && data && !document.querySelector('dialog[open]')) refresh();
 });
+function renderFeatures() {
+  renderComparison(); renderLimits(); renderGoals();
+  const settings=data.notification_settings;
+  $('alerts-body').innerHTML=`<div class="notification-line"><span class="notification-icon">◎</span><div><strong>Budget alerts ${settings.budget_alerts?'on':'off'}</strong><p>${settings.thresholds.join('%, ')}% of monthly and category limits. Sent once per threshold each month.</p></div></div><div class="notification-line"><span class="notification-icon">↻</span><div><strong>Renewal reminders ${settings.renewal_reminders?'on':'off'}</strong><p>${settings.reminder_days} day${settings.reminder_days===1?'':'s'} before configured billing dates, after 09:00. Telegram worker required.</p></div></div>`;
+}
+function renderComparison() {
+  const compare=data.comparison;
+  const suffix=compare.partial?`Through day ${data.elapsed_days} vs ${dateLabel(compare.previous_through)}`:'Full calendar months';
+  $('comparison-context').textContent=`${monthLabel(data.month)} vs ${monthLabel(compare.previous_month)} · ${suffix}`;
+  if(!compare.has_history) {
+    $('comparison-body').innerHTML='<p class="empty-inline">Your spending story starts here. Add earlier records or come back next month for a comparison.</p>';
+    return;
+  }
+  const change=compare.change===0?'Same recorded spending as the previous period':`${cash(Math.abs(compare.change))} ${compare.change>0?'more':'less'}${compare.change_percent===null?'':` (${Math.abs(compare.change_percent)}%)`} than the previous period`;
+  const rows=compare.categories.filter(c=>c.current||c.previous).sort((a,b)=>(b.current+b.previous)-(a.current+a.previous));
+  const ceiling=Math.max(1,...rows.flatMap(c=>[c.current,c.previous]));
+  $('comparison-body').innerHTML=`<div class="comparison-totals"><div><span>${monthLabel(data.month)}</span><strong>${cash(compare.current_total)}</strong></div><div><span>${monthLabel(compare.previous_month)}</span><strong>${cash(compare.previous_total)}</strong></div></div><p class="comparison-change ${compare.change>0?'up':''}">${change}</p>${rows.map(c=>`<div class="compare-row"><span>${escapeHTML(c.label)}</span><div class="compare-bars"><div class="compare-bar" style="width:${c.current/ceiling*100}%;background:${c.color}" title="This period: ${cash(c.current)}"></div><div class="compare-bar previous" style="width:${c.previous/ceiling*100}%" title="Previous period: ${cash(c.previous)}"></div></div><span class="compare-value">${cash(c.current)}<br><span class="muted">${cash(c.previous)}</span></span></div>`).join('')}<div class="compare-legend"><span><i class="legend-dot" style="background:#7963ed"></i>Selected period</span><span><i class="legend-dot" style="background:#dce1ec"></i>Previous period</span></div>`;
+}
+function renderLimits() {
+  const categories=data.categories.filter(c=>data.category_budgets[c.id]);
+  $('category-limits-body').innerHTML=categories.length?categories.map(cat=>{
+    const limit=data.category_budgets[cat.id];
+    const percent=Math.round(cat.amount/limit*100);
+    return `<div class="category-limit-row"><div class="limit-heading"><strong>${escapeHTML(cat.label)}</strong><span>${cash(cat.amount)} / ${cash(limit)}</span></div><div class="progress-track"><div class="progress-fill ${percent>100?'over':''}" style="width:${Math.min(100,percent)}%;background:${percent>100?'#d56877':cat.color}"></div></div><span class="stat-sub">${percent}% spent · ${cash(Math.abs(limit-cat.amount))} ${percent>100?'over limit':'remaining'}</span></div>`;
+  }).join(''):'<p class="empty-inline">Set individual limits for food, shopping, travel, or any other category. You choose where you want a little more structure.</p>';
+}
+function renderGoals() {
+  $('goals-list').innerHTML=data.goals.length?data.goals.map(goal=>{
+    const percent=Math.round(goal.saved/goal.target*100), complete=goal.saved>=goal.target;
+    return `<article class="goal-card"><div class="goal-top"><h3>${escapeHTML(goal.name)}</h3><button class="icon-button" data-goal-edit="${goal.id}" aria-label="Edit goal ${escapeHTML(goal.name)}">✎</button></div><div class="goal-total">${cash(goal.saved)}</div><span class="goal-target">of ${cash(goal.target)} target</span><div class="progress-track"><div class="progress-fill" style="width:${Math.min(100,percent)}%;${complete?'background:#75ad78':''}"></div></div><div class="goal-meta"><span class="${complete?'goal-complete':''}">${complete?'Goal reached':percent+'% saved'}</span><span>${goal.target_date?'Target '+dateLabel(goal.target_date)+' '+goal.target_date.slice(0,4):'Your own pace'}</span></div><button class="text-button" data-goal-add="${goal.id}">＋ Add contribution</button></article>`;
+  }).join(''):'<p class="empty-state">What are you making room for?<br>Add a savings goal to watch it grow.</p>';
+  document.querySelectorAll('[data-goal-edit]').forEach(button=>button.addEventListener('click',()=>openGoal(Number(button.dataset.goalEdit))));
+  document.querySelectorAll('[data-goal-add]').forEach(button=>button.addEventListener('click',()=>{
+    contributingGoal=Number(button.dataset.goalAdd); contributionKey=Array.from(crypto.getRandomValues(new Uint8Array(16)),b=>b.toString(16).padStart(2,'0')).join('');
+    $('contribution-goal-name').textContent=data.goals.find(g=>g.id===contributingGoal).name;
+    $('contribution-amount').value='';$('contribution-error').textContent='';$('contribution-dialog').showModal();
+  }));
+}
+function openGoal(identifier=null) {
+  editingGoal=identifier;
+  const goal=data.goals.find(g=>g.id===identifier);
+  $('goal-title').textContent=goal?'Edit savings goal':'Add savings goal';
+  $('goal-name').value=goal?.name||'';
+  $('goal-target').value=goal?(goal.target/100).toFixed(2):'';
+  $('goal-saved').value=goal?(goal.saved/100).toFixed(2):'0';
+  $('goal-date').value=goal?.target_date||'';
+  $('delete-goal').hidden=!goal;$('goal-error').textContent='';$('goal-dialog').showModal();
+}
+$('manage-category-limits').addEventListener('click',()=>{
+  $('limit-category').innerHTML=data.categories.map(c=>`<option value="${c.id}">${escapeHTML(c.label)}</option>`).join('');
+  $('category-month').textContent='Limits effective from '+monthLabel(data.month)+'.';
+  $('category-error').textContent=''; loadLimit(); $('category-dialog').showModal();
+});
+function loadLimit() {const amount=data.category_budgets[$('limit-category').value];$('limit-amount').value=amount?(amount/100).toFixed(2):'';}
+$('limit-category').addEventListener('change',loadLimit);
+$('category-form').addEventListener('submit',event=>saveForm(event,'category-error',async()=>{
+  await api('/category-budgets/'+data.month+'/'+$('limit-category').value,'PUT',{amount:$('limit-amount').value||null});
+  $('category-dialog').close();await refresh();toast('Category limit saved');
+}));
+$('add-goal').addEventListener('click',()=>openGoal());
+$('goal-form').addEventListener('submit',event=>saveForm(event,'goal-error',async()=>{
+  await api(editingGoal?'/goals/'+editingGoal:'/goals',editingGoal?'PUT':'POST',{name:$('goal-name').value,target:$('goal-target').value,saved:$('goal-saved').value,target_date:$('goal-date').value||null});
+  $('goal-dialog').close();await refresh();toast('Savings goal saved');
+}));
+$('contribution-form').addEventListener('submit',event=>saveForm(event,'contribution-error',async()=>{
+  await api('/goals/'+contributingGoal+'/contributions','POST',{amount:$('contribution-amount').value,key:contributionKey});
+  $('contribution-dialog').close();await refresh();toast('Contribution saved');
+}));
+$('delete-goal').addEventListener('click',async()=>{
+  if(!window.confirm('Delete this savings goal and its contribution records? This does not change your expenses.')) return;
+  try{await api('/goals/'+editingGoal,'DELETE');$('goal-dialog').close();await refresh();toast('Goal deleted');}catch(error){$('goal-error').textContent=error.message;}
+});
+$('edit-alerts').addEventListener('click',()=>{
+  const settings=data.notification_settings;
+  $('alerts-enabled').checked=settings.budget_alerts;$('alert-thresholds').value=settings.thresholds.join(', ');
+  $('reminders-enabled').checked=settings.renewal_reminders;$('reminder-days').value=settings.reminder_days;
+  $('alerts-error').textContent='';$('alerts-dialog').showModal();
+});
+$('alerts-form').addEventListener('submit',event=>saveForm(event,'alerts-error',async()=>{
+  const parts=$('alert-thresholds').value.split(',').map(s=>s.trim());
+  if(parts.some(s=>!/^\d+$/.test(s))) throw new Error('Enter comma-separated whole-number thresholds, for example 50, 80, 100.');
+  await api('/notification-settings','PUT',{budget_alerts:$('alerts-enabled').checked,thresholds:parts.map(Number),renewal_reminders:$('reminders-enabled').checked,reminder_days:Number($('reminder-days').value)});
+  $('alerts-dialog').close();await refresh();toast('Notification settings saved');
+}));
+async function uploadFile(path,file) {
+  const body=new FormData();body.append('file',file);
+  const response=await fetch('/api'+path,{method:'POST',credentials:'same-origin',headers:{'X-Penny-Client':'dashboard'},body});
+  const result=await response.json();
+  if(!response.ok){if(response.status===401) showLogin();throw new Error(typeof result.detail==='string'?result.detail:'Could not process this file.');}
+  return result;
+}
+$('upload-receipt').addEventListener('click',()=>$('receipt-file').click());
+$('receipt-file').addEventListener('change',async()=>{
+  const file=$('receipt-file').files[0];if(!file)return;
+  $('upload-receipt').disabled=true;$('tools-status').textContent='Reading receipt locally…';
+  try{
+    const result=await uploadFile('/receipts/preview',file);openExpense();receiptDraft=result.id;
+    const payload=result.payload;
+    $('expense-title').textContent='Review receipt';$('expense-amount').value=payload.amount;
+    $('expense-category').value=payload.category;$('expense-note').value=payload.note;$('expense-date').value=payload.spent_on;
+    $('expense-currency').value=payload.original_currency||'';$('expense-original').value=payload.original_amount||'';
+    $('currency-details').open=Boolean(payload.original_currency);$('receipt-review').hidden=false;
+    $('receipt-warning').textContent=payload.warning;$('receipt-text').textContent=payload.ocr_text;
+    $('tools-status').textContent='Receipt extracted. Review the suggested fields before saving.';
+  }catch(error){$('tools-status').textContent=error.message;}finally{$('upload-receipt').disabled=false;$('receipt-file').value='';}
+});
+$('cancel-receipt').addEventListener('click',async()=>{
+  try{if(receiptDraft) await api('/drafts/'+receiptDraft+'/cancel','POST');receiptDraft=null;$('expense-dialog').close();toast('Receipt draft discarded');}catch(error){$('expense-error').textContent=error.message;}
+});
+$('upload-csv').addEventListener('click',()=>$('csv-file').click());
+$('csv-file').addEventListener('change',async()=>{
+  const file=$('csv-file').files[0];if(!file)return;
+  $('upload-csv').disabled=true;$('tools-status').textContent='Preparing import preview…';
+  try{
+    const result=await uploadFile('/csv/preview',file);csvDraft=result.id;
+    $('csv-summary').textContent=`${result.total_rows} rows · ${result.new_rows} new · ${result.total_rows-result.new_rows} matching rows will be skipped. No records have been imported yet.`;
+    $('csv-rows').innerHTML=result.rows.slice(0,100).map(row=>`<tr><td>${escapeHTML(row.payload.spent_on)}</td><td>${escapeHTML(row.payload.note)}</td><td>${escapeHTML(row.payload.category)}</td><td>${escapeHTML(row.payload.amount)}</td><td>${row.duplicate?'Skip matching':'New record'}</td></tr>`).join('');
+    $('csv-error').textContent='';$('confirm-csv').disabled=result.new_rows===0;$('csv-dialog').showModal();
+    $('tools-status').textContent='CSV ready for review.';
+  }catch(error){$('tools-status').textContent=error.message;}finally{$('upload-csv').disabled=false;$('csv-file').value='';}
+});
+$('confirm-csv').addEventListener('click',async()=>{
+  $('confirm-csv').disabled=true;
+  try{const result=await api('/csv/'+csvDraft+'/confirm','POST');$('csv-dialog').close();csvDraft=null;await refresh();toast(`${result.imported} imported · ${result.skipped} skipped`);}catch(error){$('csv-error').textContent=error.message;}finally{$('confirm-csv').disabled=false;}
+});
+$('cancel-csv').addEventListener('click',async()=>{
+  try{if(csvDraft) await api('/drafts/'+csvDraft+'/cancel','POST');csvDraft=null;$('csv-dialog').close();}catch(error){$('csv-error').textContent=error.message;}
+});
+async function downloadCSV(all=false) {
+  try{
+    const response=await fetch('/api/csv/export'+(all?'':'?month='+encodeURIComponent(data.month)),{credentials:'same-origin'});
+    if(!response.ok)throw new Error('Could not export expenses. Sign in again if your session expired.');
+    const link=document.createElement('a'),url=URL.createObjectURL(await response.blob());link.href=url;link.download=`penny-expenses-${all?'all':data.month}.csv`;link.click();setTimeout(()=>URL.revokeObjectURL(url),1000);
+  }catch(error){$('tools-status').textContent=error.message;}
+}
+$('export-month').addEventListener('click',()=>downloadCSV());$('export-all').addEventListener('click',()=>downloadCSV(true));
 refresh();

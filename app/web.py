@@ -7,11 +7,14 @@ from collections import defaultdict, deque
 from pathlib import Path
 from contextlib import asynccontextmanager
 
-from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request, Response
+from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request, Response, UploadFile
+from starlette.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from .core import Ledger
+from .receipts import MAX_RECEIPT, extract_receipt
+from .transfers import MAX_CSV, confirm_csv, export_csv, preview_csv
 
 STATIC = Path(__file__).parent / 'static'
 
@@ -135,6 +138,65 @@ def create_app(ledger=None):
     @api.put('/subscriptions/{identifier}')
     def update_subscription(identifier: int, payload: dict):
         store.save_subscription(identifier, payload)
+        return {'ok': True}
+
+    @api.put('/category-budgets/{month}/{cat}')
+    def category_budget(month: str, cat: str, payload: dict):
+        store.set_category_budget(month, cat, payload.get('amount'))
+        return {'ok': True}
+
+    @api.put('/notification-settings')
+    def notification_settings(payload: dict):
+        return store.set_settings(payload)
+
+    @api.post('/goals', status_code=201)
+    def add_goal(payload: dict):
+        return {'id': store.save_goal(None, payload)}
+
+    @api.put('/goals/{identifier}')
+    def update_goal(identifier: int, payload: dict):
+        return {'id': store.save_goal(identifier, payload)}
+
+    @api.post('/goals/{identifier}/contributions')
+    def contribute_goal(identifier: int, payload: dict):
+        store.contribute_goal(identifier, payload.get('amount'), payload.get('key'))
+        return {'ok': True}
+
+    @api.delete('/goals/{identifier}')
+    def delete_goal(identifier: int):
+        store.delete_goal(identifier)
+        return {'ok': True}
+
+    @api.get('/csv/export')
+    def csv_export(month: str | None = None):
+        return Response(export_csv(store, month), media_type='text/csv; charset=utf-8',
+                        headers={'Content-Disposition': 'attachment; filename="penny-expenses.csv"'})
+
+    @api.post('/csv/preview')
+    async def csv_preview(file: UploadFile):
+        content = await file.read(MAX_CSV + 1)
+        await file.close()
+        return await run_in_threadpool(preview_csv, store, content)
+
+    @api.post('/csv/{identifier}/confirm')
+    def csv_confirm(identifier: str):
+        return confirm_csv(store, identifier)
+
+    @api.post('/receipts/preview')
+    async def receipt_preview(file: UploadFile):
+        content = await file.read(MAX_RECEIPT + 1)
+        await file.close()
+        payload = await run_in_threadpool(extract_receipt, content)
+        identifier = store.new_draft('receipt', payload)
+        return {'id': identifier, 'payload': payload}
+
+    @api.post('/receipts/{identifier}/confirm')
+    def receipt_confirm(identifier: str, payload: dict):
+        return store.confirm_receipt(identifier, payload)
+
+    @api.post('/drafts/{identifier}/cancel')
+    def cancel_draft(identifier: str):
+        store.cancel_draft(identifier)
         return {'ok': True}
 
     app.include_router(api)

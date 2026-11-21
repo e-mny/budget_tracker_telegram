@@ -9,6 +9,8 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+from .features import FeatureMixin, currency_fields
+
 ZONE = ZoneInfo(os.getenv('TZ', 'Asia/Singapore'))
 CATEGORIES = {
     'food': ('Food & drinks', '#7963ed'),
@@ -72,7 +74,7 @@ def money(value):
     return f'S${value / 100:,.2f}'
 
 
-class Ledger:
+class Ledger(FeatureMixin):
     def __init__(self, path=None):
         self.path = Path(path or Path(os.getenv('DATA_DIR', 'data')) / 'ledger.sqlite3')
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -112,6 +114,7 @@ class Ledger:
             ''')
             # BEGIN IMMEDIATE also serializes simultaneous first starts of web and bot.
             db.execute('BEGIN IMMEDIATE')
+            self.initialize_features(db)
             if not db.execute("SELECT 1 FROM meta WHERE key='start_month'").fetchone():
                 start = today().strftime('%Y-%m')
                 db.execute("INSERT INTO meta VALUES ('start_month',?)", (start,))
@@ -148,17 +151,19 @@ class Ledger:
 
     def add_expense(self, payload, source='dashboard', source_key=None):
         values = self.validate_expense(payload)
+        currency = currency_fields(payload)
         with self.db() as db:
-            db.execute('''INSERT OR IGNORE INTO expenses(amount,category,note,spent_on,source,source_key)
-                       VALUES (?,?,?,?,?,?)''', (*values, source, source_key))
+            db.execute('''INSERT OR IGNORE INTO expenses(amount,category,note,spent_on,source,source_key,original_currency,original_amount)
+                       VALUES (?,?,?,?,?,?,?,?)''', (*values, source, source_key, *currency))
             if source_key:
                 return dict(db.execute('SELECT * FROM expenses WHERE source_key=?', (source_key,)).fetchone())
             return dict(db.execute('SELECT * FROM expenses WHERE id=last_insert_rowid()').fetchone())
 
     def update_expense(self, identifier, payload):
         values = self.validate_expense(payload)
+        currency = currency_fields(payload)
         with self.db() as db:
-            result = db.execute('UPDATE expenses SET amount=?,category=?,note=?,spent_on=? WHERE id=? AND deleted=0', (*values, identifier))
+            result = db.execute('UPDATE expenses SET amount=?,category=?,note=?,spent_on=?,original_currency=?,original_amount=? WHERE id=? AND deleted=0', (*values, *currency, identifier))
             if not result.rowcount:
                 raise LookupError('Expense not found.')
 
@@ -232,7 +237,7 @@ class Ledger:
                 'categories': [{'id': key, 'label': label, 'color': color, 'amount': totals[key]} for key, (label, color) in CATEGORIES.items()],
                 'daily': [{'day': day, 'amount': value} for day, value in daily.items()],
                 'expenses': rows, 'subscriptions': subs, 'start_month': start_month,
-                'subscription_total': sum(s['amount'] for s in subs if s['active'])}
+                'subscription_total': sum(s['amount'] for s in subs if s['active']), **self.feature_summary(month)}
 
     def get_state(self, key, default=None):
         with self.db() as db:
@@ -246,6 +251,12 @@ class Ledger:
 
 def parse_add(text, as_of=None):
     """/add 12.50 food Lunch @2026-11-20. The date suffix is optional."""
+    original = {}
+    match = re.search(r'\s+--original\s+([A-Za-z]{3})\s+(\S+)\s*$', text)
+    if match:
+        original = {'original_currency': match[1].upper(), 'original_amount': match[2]}
+        currency_fields(original)
+        text = text[:match.start()].strip()
     parts = text.strip().split(maxsplit=2)
     if len(parts) < 2:
         raise ValueError('Use /add 12.50 food Lunch. Optional date: /add 12.50 food Lunch @YYYY-MM-DD')
@@ -261,4 +272,4 @@ def parse_add(text, as_of=None):
         except ValueError:
             raise ValueError('Use a valid date after @, for example @2026-11-20.') from None
         note = note[:suffix.start()].strip()
-    return {'amount': amount, 'category': cat, 'note': note, 'spent_on': spent_on}
+    return {'amount': amount, 'category': cat, 'note': note, 'spent_on': spent_on, **original}

@@ -6,6 +6,14 @@ A private, self-hosted expense tracker with a desktop dashboard and a personal T
 
 - Visual dashboard: category donut, daily/cumulative spending chart, totals, budget remaining, and searchable transactions.
 - Set a monthly budget yourself. No suggested or prefilled budget. A saved budget carries forward until a later month's budget replaces it; earlier months retain their previous budget.
+- Category budgets with per-category progress, and Telegram alerts at configurable budget thresholds (default 50%, 80%, 100%).
+- CSV export and reviewed import with atomic validation and duplicate detection.
+- Local receipt OCR on the dashboard or Telegram. Nothing is saved until you review and confirm.
+- Savings goals with manual contributions, kept separate from expenditure.
+- Visual month-to-month comparisons, using matching elapsed days for a month in progress.
+- Subscription renewal reminders (default 3 days ahead, after 09:00), plus annual commitment and next billing dates.
+- Travel currency records: original currency/amount and the actual SGD amount charged. No guessed exchange rate.
+- GitHub Actions publishes a tested image on pushes to `main`; a separate Proxmox timer can install updates every five minutes.
 - Add, edit, and delete expenses in the dashboard, or submit categorized expenses through Telegram.
 - Monthly recurring subscriptions, auto-recorded on the billing day.
 - Billing days initially **1**, editable in the dashboard. Entries begin in the month the database is first created. No earlier expenses are invented.
@@ -15,7 +23,7 @@ A private, self-hosted expense tracker with a desktop dashboard and a personal T
 
 ## Start on Proxmox
 
-Use a Linux VM with Docker Engine and the Docker Compose plugin installed. Copy this entire project directory to the VM. See [deployment notes](docs/deployment.md) for updates, storage, and backups.
+Use a Linux VM with Docker Engine and the Docker Compose plugin installed. Copy this entire project directory to the VM. See [deployment notes](docs/deployment.md) for automatic GitHub updates, storage, and backups. Repository: [e-mny/budget_tracker_telegram](https://github.com/e-mny/budget_tracker_telegram).
 
 ```sh
 cd money_tracker
@@ -52,6 +60,9 @@ Only that user in a private chat can read or add expenses. Group chats and other
 | `/month` | Current month total, categories, and remaining budget |
 | `/recap` | Send this month's recap and PNG chart now |
 | `/recap 2026-10` | Send a historical month's recap |
+| Send a receipt photo | Extract merchant, total, date, and category into a draft for review |
+| `/receipt DRAFT_ID 12.50 food Merchant @2026-11-20` | Correct a receipt draft, then tap Save receipt |
+| `/add 25 travel Lunch --original USD 18.50` | Record the actual SGD charge and original foreign amount |
 | `/help` | Show command help |
 
 `/add` saves immediately and returns the entry ID and monthly total. Correct mistakes using the dashboard's edit icon. Amounts must be positive with at most two decimal places. Dates use the configured local timezone; future expenses are rejected. Messages delayed by a restart use the original Telegram message date unless you provide an explicit date.
@@ -86,7 +97,7 @@ For external access, use your VPN or an HTTPS reverse proxy. If using a reverse 
 
 ## Local development and verification
 
-Python 3.12+; no Node build or CDN is required for the dashboard.
+Python 3.12+ and the Tesseract command-line program with English language data for receipt OCR; no Node build or CDN is required for the dashboard. Docker installs OCR automatically. On macOS use `brew install tesseract`; on Debian/Ubuntu use `sudo apt-get install tesseract-ocr tesseract-ocr-eng`.
 
 ```sh
 python3 -m venv .venv
@@ -105,5 +116,20 @@ docker compose config --quiet
 
 Tests use isolated temporary databases and a fixed calendar. They cover exact money, date validation, monthly budgets, recurrence and shorter months, duplicate protection, recap schedules and retries, chart generation, Telegram restrictions, authentication, and expense editing.
 
+## The added tools
+
+**Category budgets and notifications:** Set category limits from the category budget panel. Limits carry forward, and a blank limit removes it from the selected month onward. Limits are independent of the total monthly budget; their sum is not constrained to it. Notification settings control both total and category threshold alerts, reminder switches, and reminder lead time. Budget checks run after each Telegram poll. Thresholds send once per category/month; if spending crosses several at once, one message covers them. Late historical changes update the dashboard without sending old-month budget alerts. Notifications require the Telegram worker and a started private chat. As with recaps, a crash after Telegram accepts a message but before its local marker commits can rarely cause a duplicate.
+
+**CSV:** Use the Receipts & data panel to export this month or all records. Import UTF-8 CSV with `spent_on,amount,category,note,original_currency,original_amount` headers (the last three are optional). Dates are YYYY-MM-DD, and `amount` is the actual SGD charge. Maximum 2 MB / 5,000 rows. The preview validates every row before saving and shows the first 100; confirmation imports all valid file rows atomically. Exact matching records, including deleted records, are skipped; multiple identical rows in a new file retain their multiplicity. Exported descriptions are escaped against spreadsheet formulas and can be imported back. CSV exports contain expenses, not budgets, goals, settings, or passwords; use a volume backup for those.
+
+**Receipts:** Upload a JPG, PNG or WebP (10 MB / 25 MP maximum) in the dashboard or send it to the bot. Tesseract runs locally, using English OCR; low-quality or non-English receipts may need manual corrections. Review the merchant, amount, date, and category. The dashboard lets you edit all fields before Save expense; the bot lets you correct via `/receipt`, then explicitly tap Save receipt. Foreign receipts require the actual SGD charge before saving. Photos are used temporarily for OCR, then removed; review text and drafts expire after seven days. Receipt extraction is a suggestion and does not confirm a bank charge.
+
+**Savings:** Create a goal with a target, optional date, and already-saved amount; record contributions or edit the saved total. These are manual progress records and never add an expense or change your spending budget.
+
+**Comparisons:** The current month is compared with the same elapsed days of the previous month, capped at its length. Completed months use full-month totals. Months before tracking began are identified as missing history; imported historical records can supply it.
+
+**Travel currencies:** Use the optional foreign-currency fields in Add expense, or `/add 25 travel Lunch --original USD 18.50`. Totals, budgets, and charts use only the actual SGD charge. Common travel currencies are supported, including JPY/KRW/VND with no fractional units and KWD/BHD/OMR with three. No exchange-rate API, conversion estimate, or market rate is used.
+
+[Feature review status](docs/suggestions.md): ideas 1–8 are implemented; split expenses/reimbursements remain a suggestion.
 
 Implementation references: [Telegram Bot API](https://core.telegram.org/bots/api), [FastAPI security](https://fastapi.tiangolo.com/tutorial/security/), and [SQLite WAL](https://sqlite.org/wal.html).

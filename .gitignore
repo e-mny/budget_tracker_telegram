@@ -11,3 +11,5 @@ __pycache__/
 *.tar.gz
 node_modules/
 test-results/
+.deploy-state/
+.env.before-*

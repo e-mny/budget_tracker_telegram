@@ -1,72 +1,136 @@
-# Proxmox deployment
+# Proxmox deployment and automatic GitHub updates
 
-Use Docker inside your existing Linux VM or a dedicated Linux VM on Proxmox. A bridged adapter and reserved LAN IP make desktop access straightforward. No Proxmox-specific API or host modification is required. This project uses its own port and volume; it does not modify the ACL tracker.
+Repository: https://github.com/e-mny/budget_tracker_telegram
 
-## Install and run
+Pushes to `main` run the application and deployment tests, build a Linux amd64 image, verify its isolation/private-data exclusions, and publish it to **`ghcr.io/e-mny/budget_tracker_telegram`**. Both dashboard and Telegram use that same image. A **Penny** systemd timer on the Docker host checks for new images every five minutes and recreates changed services with the existing expense volume. It does not modify the ACL tracker's timer or containers. No inbound GitHub webhook or SSH deployment port is required.
 
-Transfer the directory to a location such as `/opt/money_tracker` on the VM:
+## One-time setup on your Linux Docker VM
+
+Run inside the VM/LXC where Docker is installed, not on the Proxmox hypervisor. Requirements: Docker Engine, Compose v2.20+, Bash, Python 3, `flock`, and systemd. Use a bridged adapter and reserved LAN IP for desktop access.
+
+Wait for the first **Test and publish Penny** workflow on GitHub to succeed. The workflow uses GitHub's `GITHUB_TOKEN` with package write permission; repository/org policies must allow Actions and package publishing.
+
+Clone the repository (or fast-forward an existing clean checkout):
 
 ```sh
-cd /opt/money_tracker
+git clone https://github.com/e-mny/budget_tracker_telegram.git
+cd budget_tracker_telegram
+# Existing checkout: git pull --ff-only
+```
+
+For a fresh installation only:
+
+```sh
 cp .env.example .env
 chmod 600 .env
 ```
 
-Edit `.env` locally on the server, choose a unique `DASHBOARD_PASSWORD` of 12+ characters, and optionally configure Telegram as described in the main README.
+For an existing Penny installation, **retain its `.env`** and privately back it up. Configure the dashboard password (12+ characters), Telegram token, personal user ID, and `COMPOSE_PROFILES=telegram` if using the bot. Merge these deployment values into that same `.env`:
 
-```sh
-docker compose config --quiet
-docker compose up -d --build
-docker compose ps
-docker compose logs --tail=50
+```dotenv
+COMPOSE_PROJECT_NAME=money-tracker
+IMAGE_REPOSITORY=ghcr.io/e-mny/budget_tracker_telegram
+IMAGE_TAG=latest
+MONEY_DATA_VOLUME=money-tracker_money_data
 ```
 
-Open `http://VM-LAN-IP:8081`. If 8081 is already occupied, change `PORT` in `.env`. The dashboard has a database-backed health check. The worker depends on dashboard readiness and retries outbound Telegram failures. A missing/invalid bot token is reported through worker logs. The Docker host needs working DNS, accurate system time, and outbound HTTPS to Telegram.
-
-The image runs as UID 10001, with dropped capabilities, a read-only root filesystem, a writable temporary filesystem, and a persistent named data volume. Both services mount that same volume, which contains `ledger.sqlite3` and SQLite WAL files. Run exactly one Telegram worker per bot token and one Compose project per ledger. Do not share this SQLite file over NFS/SMB.
-
-## Update
-
-Replace the application source while retaining `.env` and the deployment's existing volume. Then run:
+Keep the **existing project name and exact volume name** if they differ. Changing project names can start a second Telegram worker with the same token. To inspect an existing deployment:
 
 ```sh
-docker compose up -d --build
-docker compose ps
+docker compose ls
+docker volume ls
+docker inspect --format '{{range .Mounts}}{{println .Destination .Name}}{{end}}' DASHBOARD_CONTAINER_ID
 ```
 
-No container registry, GitHub deployment, or automatic updater is configured. This keeps setup independent of accounts you have not provided. The current Compose project name is fixed as `money-tracker`; its default data volume is `money-tracker_money_data`. Keep the same project name for updates.
+The existing `/data` mount contains the ledger, receipt drafts, sessions, budgets, goals and notification history. Production Compose uses an **external volume** and refuses to silently create a replacement. The updater verifies it matches any existing container in this project.
 
-## Back up
-
-Stop both writers for a consistent backup. These commands explicitly enable the Telegram profile, so they work whether or not it is selected in `.env`:
+**For a genuinely new installation only**, create the selected volume once:
 
 ```sh
-docker compose --profile telegram stop
-# Store the archive somewhere private, preferably outside this source tree.
-docker compose run --rm --no-deps -T --entrypoint tar dashboard -czf - -C /data . > money-backup.tar.gz
-docker compose up -d
+docker volume create money-tracker_money_data
 ```
 
-Back up `.env` separately using a secure secret-storage method. The archive contains financial data and session records. Restrict access to it. Keep an off-server copy.
-
-Restore to an empty deployment volume with the same Compose setup:
+New GHCR packages may be private. For a private image, log in as root (the updater's user) with a GitHub classic personal access token with `read:packages` and access to the package. Enter the token at the password prompt, never as a command argument or in source:
 
 ```sh
-docker compose --profile telegram stop
-docker compose run --rm --no-deps -T --entrypoint tar dashboard --no-same-owner -xzf - -C /data < money-backup.tar.gz
-docker compose up -d
+sudo docker login ghcr.io --username e-mny
 ```
 
-Use an empty volume for restore; merging unrelated database/WAL files can corrupt data. The named volume normally assigns ownership to UID 10001 on first use. If you substitute a host bind mount, provision that directory for UID 10001 yourself.
+Public images allow anonymous pulls. GitHub package visibility is managed separately from the repository; no visibility change is made by the workflow.
 
-`docker compose down` keeps the volume. **`docker compose down -v` deletes the ledger permanently.**
+Run the first image deployment, then enable the timer:
+
+```sh
+sudo env PENNY_DEPLOY_DIR="$PWD" bash deploy/update.sh
+sudo docker compose -f compose.production.yaml ps
+sudo bash deploy/install-auto-update.sh "$PWD"
+sudo systemctl list-timers penny-update.timer
+```
+
+Open **http://VM-LAN-IP:8081**. Configure subscription billing days and your budget. Press Start in the new bot's private chat. Keep only the Proxmox worker running with the live bot token.
+
+## Normal update flow
+
+Commit reviewed changes and push them to `main`. GitHub tests, builds, and publishes the release. The timer pulls it at the next check (about five minutes after publishing; build time is additional). No source rebuild is needed on Proxmox.
+
+The updater serializes runs with a lock, checks volumes before pulling, verifies matching 40-character image revision labels, and waits for dashboard health. Failed pulls or invalid revisions leave running containers alone. Configuration/Compose/updater changes still require a deliberate server `git pull --ff-only` and installer rerun when applicable. The timer does not pull Git source or overwrite `.env`.
+
+Monitor or trigger updates:
+
+```sh
+sudo journalctl -u penny-update.service -n 100 --no-pager
+sudo systemctl start penny-update.service
+sudo docker compose -f compose.production.yaml logs --tail=50 telegram
+```
+
+Budget alerts run after each polling batch; subscription reminders run after 09:00 local time within the configured lead window. Both depend on the bot worker and outbound Telegram access. OCR is installed in the image and runs locally.
+
+## Rollback
+
+Disable scheduled checks while reviewing a rollback:
+
+```sh
+sudo systemctl disable --now penny-update.timer
+```
+
+The updater records source revisions in `.deploy-state/current-release` and `.deploy-state/previous-release`. Set `.env` to `IMAGE_TAG=sha-FULL_PREVIOUS_COMMIT`, verify that release is compatible with the current database, then run `sudo systemctl start penny-update.service`. A first deployment may have no previous labeled revision. An image rollback does not reverse database migrations. Keep a private backup before updates. Leave the tag pinned until ready to resume `latest`.
+
+## Backup and restore
+
+Stop both writers, then back up the complete volume:
+
+```sh
+sudo docker compose -f compose.production.yaml --profile telegram stop
+sudo docker compose -f compose.production.yaml run --rm --no-deps -T --entrypoint tar dashboard -czf - -C /data . > money-backup.tar.gz
+sudo docker compose -f compose.production.yaml up -d
+```
+
+Back up `.env` separately through secure secret storage. The archive contains financial data, review drafts, settings and sessions; restrict access and keep an off-server copy. CSV is an expense transfer format, not a full backup.
+
+Restore into an **empty** deployment volume with the same configuration:
+
+```sh
+sudo docker compose -f compose.production.yaml --profile telegram stop
+sudo docker compose -f compose.production.yaml run --rm --no-deps -T --entrypoint tar dashboard --no-same-owner -xzf - -C /data < money-backup.tar.gz
+sudo docker compose -f compose.production.yaml up -d
+```
+
+Do not merge unrelated database/WAL files. The image uses UID 10001 and Docker initializes a new named volume with that ownership; a host bind mount must be provisioned for UID 10001. Do not use NFS/SMB for this SQLite file. Source-build `docker compose down -v` deletes its managed data volume; preserve the volume during updates.
+
+## Source builds
+
+For local development or manual deployment, ordinary `compose.yaml` still supports `docker compose up -d --build`, with its own persistent `money_data` volume. Keep the same project and volume names when switching to production images. Use `compose.production.yaml` consistently once the timer is installed.
 
 ## Troubleshooting
 
-- Dashboard won't start: check that `DASHBOARD_PASSWORD` is set and at least 12 characters long; inspect `docker compose logs dashboard`.
-- No bot replies: confirm the new token, personal numeric user ID, `COMPOSE_PROFILES=telegram`, and that you pressed Start in its private chat. Other users and groups are intentionally ignored.
-- Recap missing: keep the worker running, check the timezone and outbound internet. Failed delivery retries automatically; Telegram cannot initiate a private conversation before you start it.
-- Bot conflict errors: stop any other deployment polling the same bot token.
-- Wrong subscription charge: edit the already recorded transaction, then edit the subscription for subsequent months. Recurring settings do not rewrite history.
-- Login loops through a proxy: check HTTPS, `COOKIE_SECURE`, forwarded scheme, Host header, and Uvicorn trusted proxy configuration. Authenticated API writes must be same-origin.
-- A budget affects a later month: budgets carry forward by design. Set a replacement for that later month if desired.
+- Missing volume: confirm the existing container's `/data` mount. Never create a new volume merely to bypass the check on an existing deployment.
+- Unauthorized image pull: check root's GHCR login, package access and image visibility.
+- Missing manifest: wait for the first publish to finish and verify the image prefix/tag.
+- Bot has no replies: confirm the new token, personal numeric user ID, Telegram profile, and Start in private chat. Groups and other users are ignored.
+- Telegram polling conflict: stop the other worker using that same token.
+- Notifications missing: check worker logs, notification settings, timezone and internet access. Alerts need a configured budget; renewal reminders use the configured schedule, not bank data.
+- Wrong recurring charge: edit the recorded expense and the subscription's future settings separately.
+- Password/login errors: check the 12-character minimum, HTTPS cookie setting, and reverse-proxy Host/scheme configuration.
+- Receipt OCR error: try a sharp, upright English receipt, or enter the expense manually. Extraction never saves automatically.
+
+References: [GitHub publishing](https://docs.github.com/en/actions/tutorials/publish-packages/publish-docker-images), [GHCR access](https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-container-registry), [local Tesseract OCR](https://tesseract-ocr.github.io/tessdoc/Command-Line-Usage.html).
