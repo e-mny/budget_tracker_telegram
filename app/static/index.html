@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="theme-color" content="#19253e"><title>Penny · Your money, in view</title>
+  <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/static/style.css"><script src="/static/app.js" defer></script>
+</head>
+<body>
+  <div id="login-view" class="login-view" hidden>
+    <div class="login-brand"><span class="brand-mark">p</span> penny<span class="brand-dot">.</span></div>
+    <form id="login-form" class="login-card">
+      <span class="eyebrow">YOUR PERSONAL MONEY SPACE</span>
+      <h1>A clearer picture<br>of your everyday.</h1>
+      <p>Sign in to see your spending, keep an eye on your budget, and make room for what matters.</p>
+      <label for="password">Dashboard password</label>
+      <input id="password" name="password" type="password" autocomplete="current-password" required autofocus>
+      <p id="login-error" class="error" role="alert"></p>
+      <button class="button primary" type="submit">Sign in</button>
+      <span class="login-foot">Private ledger · Self-hosted · SGD</span>
+    </form>
+    <div class="login-decoration" aria-hidden="true"><span>Spend with perspective.</span><div class="decor-ring"></div></div>
+  </div>
+  <div id="app-view" hidden>
+    <aside class="sidebar">
+      <a href="#overview" class="brand"><span class="brand-mark">p</span> penny<span class="brand-dot">.</span></a>
+      <div class="workspace-label">PERSONAL FINANCE</div>
+      <nav aria-label="Main navigation">
+        <a href="#overview" class="nav-item active" data-nav="overview"><span class="nav-icon">▦</span> Overview</a>
+        <a href="#transactions" class="nav-item" data-nav="transactions"><span class="nav-icon">≡</span> Transactions</a>
+        <a href="#budget-panel" class="nav-item" data-nav="budget-panel"><span class="nav-icon">◉</span> Monthly budget</a>
+        <a href="#subscriptions" class="nav-item" data-nav="subscriptions"><span class="nav-icon">↻</span> Subscriptions</a>
+      </nav>
+      <div class="sidebar-note"><span class="note-icon">✦</span><strong>Little things add up.</strong><p>Every expense logged is a little more clarity.</p><span>Log on Telegram with /add</span></div>
+      <div class="sidebar-bottom"><div class="avatar">ME</div><div><strong>My money</strong><span>SGD · Singapore</span></div><button id="logout" class="icon-button" title="Sign out" aria-label="Sign out">⏻</button></div>
+    </aside>
+    <main>
+      <header class="topbar"><span>Your money, in view.</span><div><span id="refresh-state" class="muted" aria-live="polite"></span><button id="refresh" class="text-button" aria-label="Refresh dashboard">↻ Refresh</button></div></header>
+      <div class="page-content">
+        <section id="overview" class="page-heading"><div><div class="eyebrow">THE BIG PICTURE</div><h1>Spending overview<span class="heading-dot">.</span></h1><p>Know where it goes. Choose what comes next.</p></div><div class="heading-actions"><label class="month-picker"><span class="sr-only">View month</span><input type="month" id="month" aria-label="View month"></label><button id="add-expense" class="button primary"><span aria-hidden="true">＋</span> Add expense</button></div></section>
+        <div id="page-error" class="page-error" role="alert" hidden></div>
+        <div id="loading" class="loading">Getting your spending in view…</div>
+        <div id="dashboard" hidden>
+          <section class="stats-grid" aria-label="Monthly totals">
+            <article class="stat-card"><div class="stat-label">Total spent <span class="stat-icon purple">↗</span></div><div id="total" class="stat-value"></div><div id="total-sub" class="stat-sub"></div></article>
+            <article class="stat-card"><div class="stat-label">Monthly budget <span class="stat-icon blue">◎</span></div><div id="budget" class="stat-value"></div><button id="set-budget-stat" class="stat-sub link-button">Set your monthly limit</button></article>
+            <article class="stat-card"><div class="stat-label">Budget remaining <span class="stat-icon green">◒</span></div><div id="remaining" class="stat-value"></div><div id="remaining-sub" class="stat-sub"></div></article>
+            <article class="stat-card"><div class="stat-label">Daily average <span class="stat-icon orange">≋</span></div><div id="average" class="stat-value"></div><div id="average-sub" class="stat-sub"></div></article>
+          </section>
+          <div class="primary-grid">
+            <section class="panel category-panel"><div class="panel-heading"><div><h2>Where your money went</h2><p>Your spending, by category</p></div><span class="badge">SGD</span></div><div id="category-chart" class="category-body"></div></section>
+            <section class="panel spending-panel"><div class="panel-heading"><div><h2>The daily picture</h2><p id="trend-subtitle">Your spending through the month</p></div><div class="segmented" role="group" aria-label="Chart display"><button data-chart="daily" class="selected" aria-pressed="true">Daily</button><button data-chart="cumulative" aria-pressed="false">Cumulative</button></div></div><div id="trend-chart" class="trend-chart"></div><div class="chart-footer"><span><i class="legend-dot" style="background:#7963ed"></i> Recorded spending</span><span id="chart-context"></span></div></section>
+          </div>
+          <div class="secondary-grid">
+            <section id="budget-panel" class="panel budget-panel"><div class="panel-heading"><div><h2>A little room to breathe</h2><p>Your monthly budget at a glance</p></div><button id="edit-budget" class="text-button">Set budget</button></div><div id="budget-body"></div></section>
+            <section id="subscriptions" class="panel subscriptions-panel"><div class="panel-heading"><div><h2>On repeat</h2><p>Monthly subscriptions · auto-recorded</p></div><button id="new-subscription" class="text-button">＋ Add</button></div><div id="subscription-list"></div><div class="subscription-footer"><span>Monthly commitment</span><strong id="subscription-total"></strong></div><p class="tiny-note">Billing dates default to day 1. Click an entry to edit. Changes apply to unrecorded charges.</p></section>
+          </div>
+          <section id="transactions" class="panel transactions-panel"><div class="panel-heading"><div><h2>The little details</h2><p id="transaction-count">All your expenses, in one place</p></div><div class="transaction-filters"><label><span class="sr-only">Search expenses</span><input id="search" type="search" placeholder="Search expenses…"></label><label class="select-wrap"><span class="sr-only">Filter category</span><select id="filter-category" aria-label="Filter category"><option value="">All categories</option></select></label></div></div><div class="table-scroll"><table><thead><tr><th>Date</th><th>Description</th><th>Category</th><th>Source</th><th class="amount-cell">Amount</th><th><span class="sr-only">Actions</span></th></tr></thead><tbody id="transaction-rows"></tbody></table></div><div id="table-empty" class="empty-state" hidden></div></section>
+          <footer class="page-footer"><span>Penny · Make every dollar a little clearer.</span><span id="data-note">SGD · Asia/Singapore · Recorded expenses only</span></footer>
+        </div>
+      </div>
+    </main>
+  </div>
+  <dialog id="expense-dialog"><form id="expense-form"><div class="dialog-heading"><div><span class="eyebrow">THE LITTLE DETAILS</span><h2 id="expense-title">Add an expense</h2></div><button class="close-dialog icon-button" type="button" aria-label="Close">×</button></div><label for="expense-amount">Amount (SGD)</label><input type="number" id="expense-amount" min="0.01" max="9999999.99" step="0.01" placeholder="0.00" required><div class="form-row"><div><label for="expense-category">Category</label><div class="select-wrap"><select id="expense-category" required></select></div></div><div><label for="expense-date">Date</label><input type="date" id="expense-date" required></div></div><label for="expense-note">Description <span class="muted">(optional)</span></label><input id="expense-note" maxlength="240" placeholder="What was it for?"><p id="expense-error" class="error" role="alert"></p><div class="dialog-actions"><button type="button" id="delete-expense" class="button danger" hidden>Delete expense</button><button type="submit" class="button primary">Save expense</button></div></form></dialog>
+  <dialog id="budget-dialog"><form id="budget-form"><div class="dialog-heading"><div><span class="eyebrow">MAKE A LITTLE ROOM</span><h2>Set your monthly budget</h2></div><button class="close-dialog icon-button" type="button" aria-label="Close">×</button></div><p id="budget-dialog-description"></p><label for="budget-amount">Budget (SGD)</label><input id="budget-amount" type="number" min="0.01" max="9999999.99" step="0.01" placeholder="Enter your monthly limit" required><p class="form-hint">This amount carries forward to following months until you set a new budget. All recorded expenses, including subscriptions, count towards it.</p><p id="budget-error" class="error" role="alert"></p><div class="dialog-actions"><button class="button primary" type="submit">Save budget</button></div></form></dialog>
+  <dialog id="subscription-dialog"><form id="subscription-form"><div class="dialog-heading"><div><span class="eyebrow">ON REPEAT</span><h2 id="subscription-title">Edit subscription</h2></div><button class="close-dialog icon-button" type="button" aria-label="Close">×</button></div><label for="subscription-name">Name</label><input id="subscription-name" maxlength="100" required><div class="form-row"><div><label for="subscription-amount">Monthly amount (SGD)</label><input id="subscription-amount" type="number" min="0.01" max="9999999.99" step="0.01" required></div><div><label for="subscription-day">Billing day</label><input id="subscription-day" type="number" min="1" max="31" step="1" required></div></div><label class="checkbox-label"><input id="subscription-active" type="checkbox"> Active monthly subscription</label><p class="form-hint">Charges are auto-recorded on the billing day, starting this month. Days 29–31 use the last day of shorter months. Existing recorded expenses stay as recorded; correct them in Transactions.</p><p id="subscription-error" class="error" role="alert"></p><div class="dialog-actions"><button class="button primary" type="submit">Save subscription</button></div></form></dialog>
+  <dialog id="confirm-dialog"><div class="dialog-heading"><h2>Delete this expense?</h2><button class="close-dialog icon-button" type="button" aria-label="Close">×</button></div><p id="confirm-description"></p><p class="form-hint">It will be removed from your totals. Auto-recorded subscriptions deleted here will not reappear for this month.</p><p id="confirm-error" class="error" role="alert"></p><div class="dialog-actions"><button id="cancel-delete" class="button secondary">Keep expense</button><button id="confirm-delete" class="button danger">Delete expense</button></div></dialog>
+  <div id="toast" role="status" hidden></div>
+</body>
+</html>

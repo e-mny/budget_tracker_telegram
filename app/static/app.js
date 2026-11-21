@@ -1,0 +1,263 @@
+'use strict';
+const $ = id => document.getElementById(id);
+const cash = cents => new Intl.NumberFormat('en-SG', {style:'currency',currency:'SGD',currencyDisplay:'narrowSymbol'}).format(cents / 100);
+const escapeHTML = value => String(value).replace(/[&<>"']/g, char => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));
+const monthLabel = month => new Date(month + '-01T12:00:00').toLocaleDateString('en-SG', {month:'long',year:'numeric'});
+const dateLabel = date => new Date(date + 'T12:00:00').toLocaleDateString('en-SG', {day:'2-digit',month:'short'});
+let data, chartMode = 'daily', editingExpense = null, editingSubscription = null, refreshSequence = 0, toastTimer;
+
+async function api(path, method='GET', body) {
+  const response = await fetch('/api' + path, {method, credentials:'same-origin',
+    headers:{'Content-Type':'application/json','X-Penny-Client':'dashboard'},
+    ...(body === undefined ? {} : {body:JSON.stringify(body)})});
+  const result = await response.json();
+  if (!response.ok) {
+    if (response.status === 401) showLogin();
+    const detail = typeof result.detail === 'string' ? result.detail : 'Check the entered values and try again.';
+    const error = new Error(detail);
+    error.status = response.status;
+    throw error;
+  }
+  return result;
+}
+function showLogin() {
+  $('app-view').hidden = true;
+  $('login-view').hidden = false;
+  document.querySelectorAll('dialog[open]').forEach(dialog => dialog.close());
+  $('password').focus();
+}
+function toast(message) {
+  clearTimeout(toastTimer);
+  $('toast').textContent = message;
+  $('toast').hidden = false;
+  toastTimer = setTimeout(() => {$('toast').hidden = true;}, 4000);
+}
+async function refresh() {
+  const sequence = ++refreshSequence;
+  $('refresh-state').textContent = 'Updating…';
+  $('page-error').hidden = true;
+  const month = $('month').value;
+  try {
+    const result = await api('/summary' + (month ? '?month=' + encodeURIComponent(month) : ''));
+    if (sequence !== refreshSequence) return;
+    data = result;
+    $('login-view').hidden = true;
+    $('app-view').hidden = false;
+    $('loading').hidden = true;
+    $('dashboard').hidden = false;
+    $('month').value = data.month;
+    $('month').max = data.today.slice(0,7);
+    $('expense-date').max = data.today;
+    render();
+    $('refresh-state').textContent = 'Up to date';
+  } catch(error) {
+    if (sequence !== refreshSequence) return;
+    $('refresh-state').textContent = 'Could not update';
+    $('loading').hidden = true;
+    $('page-error').textContent = error.message;
+    $('page-error').hidden = false;
+    if (!data) {
+      showLogin();
+      $('login-error').textContent = error.status === 401 ? '' : error.message;
+    }
+  }
+}
+function render() {
+  $('total').textContent = cash(data.total);
+  $('total-sub').textContent = `${data.count} recorded expense${data.count === 1 ? '' : 's'} this month`;
+  $('budget').textContent = data.budget === null ? 'Not set yet' : cash(data.budget);
+  $('budget').classList.toggle('unset', data.budget === null);
+  $('set-budget-stat').textContent = data.budget === null ? 'Set your monthly limit' : 'Edit monthly budget';
+  $('remaining').textContent = data.remaining === null ? '—' : cash(Math.abs(data.remaining));
+  $('remaining').classList.toggle('negative', data.remaining !== null && data.remaining < 0);
+  $('remaining-sub').textContent = data.remaining === null ? 'Set a budget to see what’s left' : data.remaining < 0 ? 'Over your monthly budget' : `${Math.round(Math.max(0, data.remaining) / data.budget * 100)}% of your budget still available`;
+  $('average').textContent = cash(data.daily_average);
+  $('average-sub').textContent = `Across ${data.elapsed_days} calendar days`;
+  const previousFilter = $('filter-category').value;
+  const options = data.categories.map(cat => `<option value="${cat.id}">${escapeHTML(cat.label)}</option>`).join('');
+  $('filter-category').innerHTML = '<option value="">All categories</option>' + options;
+  $('filter-category').value = previousFilter;
+  $('expense-category').innerHTML = options;
+  $('data-note').textContent = `SGD · ${data.timezone} · Recorded expenses only`;
+  renderCategories(); renderTrend(); renderBudget(); renderSubscriptions(); renderTransactions();
+}
+function renderCategories() {
+  const categories = data.categories.filter(cat => cat.amount > 0).sort((a,b) => b.amount - a.amount);
+  let offset = 0;
+  const circles = categories.map(cat => {
+    const size = cat.amount / data.total * 100;
+    const circle = `<circle cx="100" cy="100" r="77" fill="none" stroke="${cat.color}" stroke-width="24" pathLength="100" stroke-dasharray="${size} ${100-size}" stroke-dashoffset="${-offset}"><title>${escapeHTML(cat.label)}: ${cash(cat.amount)} (${Math.round(size)}%)</title></circle>`;
+    offset += size;
+    return circle;
+  }).join('');
+  const totalDisplay = data.total >= 10000000 ? '$' + (data.total / 100000).toFixed(1) + 'k' : cash(data.total);
+  $('category-chart').innerHTML = `<div class="donut"><svg viewBox="0 0 200 200" role="img" aria-label="Spending by category"><circle cx="100" cy="100" r="77" fill="none" stroke="#f0eef8" stroke-width="24"/>${circles}</svg><div class="donut-center"><strong title="${cash(data.total)}">${totalDisplay}</strong><span>Total this month</span></div></div><div class="category-legend">${categories.length ? categories.map(cat => `<div class="legend-row"><i class="legend-dot" style="background:${cat.color}"></i><span class="legend-label" title="${escapeHTML(cat.label)}">${escapeHTML(cat.label)}</span><span class="legend-amount">${cash(cat.amount)}<span class="legend-percent">${Math.round(cat.amount / data.total * 100)}%</span></span></div>`).join('') : '<p class="empty-state">A fresh start.<br>Add an expense to see your breakdown.</p>'}</div>`;
+}
+function renderTrend() {
+  const width=640, height=267, left=53, right=20, top=22, bottom=37;
+  const plotWidth=width-left-right, plotHeight=height-top-bottom;
+  let total = 0;
+  const values = data.daily.map(d => {total += d.amount; return chartMode === 'daily' ? d.amount : total;});
+  const maxValue = Math.max(1000, ...values);
+  const scale = 10 ** Math.floor(Math.log10(maxValue));
+  const ceiling = Math.ceil(maxValue / scale) * scale;
+  const y = value => top + plotHeight - value / ceiling * plotHeight;
+  const x = day => left + (day-0.5) / data.days_in_month * plotWidth;
+  let svg = '';
+  for (let tick=0; tick<=4; tick++) {
+    const value=ceiling*tick/4, pos=y(value);
+    const label=value >= 100000 ? '$' + (value/100000).toFixed(value%100000 ? 1:0) + 'k' : '$' + Math.round(value/100);
+    svg += `<line x1="${left}" x2="${width-right}" y1="${pos}" y2="${pos}" stroke="#edf0f6" stroke-dasharray="4 5"/><text x="${left-10}" y="${pos+4}" text-anchor="end" fill="#9ba3b2" font-size="12">${label}</text>`;
+  }
+  const isCurrent = data.month === data.today.slice(0,7);
+  const elapsed = isCurrent ? data.elapsed_days : data.days_in_month;
+  if (chartMode === 'daily') {
+    for (let day=1; day<=elapsed; day++) {
+      const value=values[day-1];
+      const barWidth=Math.max(3, plotWidth/data.days_in_month-7);
+      if (value > 0) svg += `<rect x="${x(day)-barWidth/2}" y="${y(value)}" width="${barWidth}" height="${Math.max(1, value/ceiling*plotHeight)}" rx="3" fill="${day===data.elapsed_days && isCurrent ? '#7963ed' : '#c2b8f6'}"><title>${day} ${monthLabel(data.month)}: ${cash(value)}</title></rect>`;
+    }
+  } else {
+    const points=values.slice(0,elapsed).map((v,i) => `${x(i+1)},${y(v)}`);
+    svg += `<defs><linearGradient id="area-fill" x1="0" x2="0" y1="0" y2="1"><stop stop-color="#7963ed" stop-opacity=".18"/><stop offset="1" stop-color="#7963ed" stop-opacity="0"/></linearGradient></defs><polygon points="${x(1)},${y(0)} ${points.join(' ')} ${x(elapsed)},${y(0)}" fill="url(#area-fill)"/><polyline points="${points.join(' ')}" fill="none" stroke="#7963ed" stroke-width="2.5" stroke-linejoin="round"/>`;
+    values.slice(0,elapsed).forEach((value,i) => {svg += `<circle cx="${x(i+1)}" cy="${y(value)}" r="4" fill="#7963ed"><title>Through day ${i+1}: ${cash(value)}</title></circle>`;});
+  }
+  [1,5,10,15,20,25,data.days_in_month].forEach(day => {svg += `<text x="${x(day)}" y="${height-11}" text-anchor="middle" fill="#9ba3b2" font-size="12">${day}</text>`;});
+  const dailyDescription = data.daily.slice(0, elapsed).map(d => `${d.day}: ${cash(d.amount)}`).join('; ');
+  $('trend-chart').innerHTML = `<svg viewBox="0 0 ${width} ${height}" role="img" aria-label="${chartMode==='daily'?'Daily':'Cumulative'} spending for ${monthLabel(data.month)}"><desc>${escapeHTML(dailyDescription)}</desc>${svg}</svg>`;
+  $('chart-context').textContent = monthLabel(data.month);
+}
+function renderBudget() {
+  $('edit-budget').textContent = data.budget === null ? 'Set budget' : 'Edit budget';
+  if (data.budget === null) {
+    $('budget-body').innerHTML = '<div class="budget-content budget-unset"><p>Give your spending a direction. Set a monthly limit to see what’s available as you go.</p><button class="button primary" id="empty-budget-button">Set a monthly budget</button></div>';
+    $('empty-budget-button').addEventListener('click', openBudget);
+    return;
+  }
+  const percent=data.total/data.budget*100;
+  const over=data.remaining<0;
+  const isCurrent=data.month===data.today.slice(0,7);
+  const daysLeft=isCurrent ? data.days_in_month - data.elapsed_days : 0;
+  let insight;
+  if (over) insight = `You’re ${cash(-data.remaining)} over your budget for ${monthLabel(data.month)}.`;
+  else if (isCurrent && daysLeft > 0) insight = `${cash(data.remaining)} left for the month. That’s about ${cash(Math.floor(data.remaining/daysLeft))} per day across the ${daysLeft} remaining days.`;
+  else insight = `You finished ${monthLabel(data.month)} with ${cash(data.remaining)} of your budget remaining.`;
+  $('budget-body').innerHTML = `<div class="budget-content"><div class="budget-main"><strong>${cash(data.total)}</strong><span>of ${cash(data.budget)} budget</span></div><div class="progress-track" role="progressbar" aria-label="Monthly budget spent" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${Math.min(100,Math.round(percent))}" aria-valuetext="${Math.round(percent)} percent of budget spent"><div class="progress-fill ${over?'over':''}" style="width:${Math.min(100,percent)}%"></div></div><div class="budget-caption"><span>${Math.round(percent)}% spent</span><span>${cash(Math.abs(data.remaining))} ${over?'over budget':'remaining'}</span></div><div class="budget-insight ${over?'warn':''}"><b aria-hidden="true">${over?'!':'✦'}</b><span>${insight}</span></div></div>`;
+}
+function renderSubscriptions() {
+  $('subscription-list').innerHTML = data.subscriptions.map(sub => `<button class="subscription-row ${sub.active?'':'inactive'}" data-subscription="${sub.id}" aria-label="Edit subscription ${escapeHTML(sub.name)}"><span class="sub-icon">${escapeHTML(sub.name.slice(0,1).toUpperCase())}</span><span class="sub-copy"><strong>${escapeHTML(sub.name)}</strong><small>${sub.active ? `Day ${sub.billing_day} of each month` : 'Paused'}</small></span><span class="sub-amount">${cash(sub.amount)}</span></button>`).join('');
+  $('subscription-total').textContent = cash(data.subscription_total) + ' / month';
+  $('subscription-list').querySelectorAll('[data-subscription]').forEach(button => button.addEventListener('click', () => openSubscription(Number(button.dataset.subscription))));
+}
+function renderTransactions() {
+  if (!data) return;
+  const query=$('search').value.trim().toLowerCase(), filter=$('filter-category').value;
+  const rows=data.expenses.filter(row => (!filter || row.category===filter) && (!query || `${row.note} ${row.category} ${row.spent_on} ${data.categories.find(c=>c.id===row.category).label}`.toLowerCase().includes(query)));
+  $('transaction-count').textContent = `${rows.length} of ${data.count} expense${data.count===1?'':'s'} · ${monthLabel(data.month)}`;
+  $('transaction-rows').innerHTML = rows.map(row => {
+    const cat=data.categories.find(c=>c.id===row.category);
+    const source=({'telegram':'Telegram','subscription':'Auto-recorded','dashboard':'Dashboard'})[row.source] || 'Dashboard';
+    return `<tr><td>${dateLabel(row.spent_on)}</td><td title="${escapeHTML(row.note)}">${escapeHTML(row.note || cat.label)}</td><td><span class="category-pill" style="--pill-bg:${cat.color}16;--pill-color:${cat.color}"><i class="legend-dot" style="background:${cat.color}"></i>${escapeHTML(cat.label)}</span></td><td><span class="source-tag">${source}</span></td><td class="amount-cell">${cash(row.amount)}</td><td><button class="edit-expense" data-expense="${row.id}" aria-label="Edit ${escapeHTML(row.note || cat.label)}">✎</button></td></tr>`;
+  }).join('');
+  $('table-empty').hidden = rows.length>0;
+  $('table-empty').textContent = data.count ? 'No expenses match your filters.' : 'Nothing recorded yet. Add your first expense here or send /add on Telegram.';
+  $('transaction-rows').querySelectorAll('[data-expense]').forEach(button => button.addEventListener('click', () => openExpense(Number(button.dataset.expense))));
+}
+function openExpense(identifier=null) {
+  if (!data) return;
+  editingExpense=identifier;
+  const row=data.expenses.find(row=>row.id===identifier);
+  $('expense-form').reset();
+  $('expense-title').textContent = row ? 'Edit expense' : 'Add an expense';
+  $('expense-amount').value = row ? (row.amount/100).toFixed(2) : '';
+  $('expense-category').value = row?.category || 'food';
+  $('expense-date').value = row?.spent_on || data.today;
+  $('expense-note').value = row?.note || '';
+  $('delete-expense').hidden = !row;
+  $('expense-error').textContent = '';
+  $('expense-dialog').showModal();
+}
+function openBudget() {
+  if (!data) return;
+  $('budget-dialog-description').textContent = `Your limit for ${monthLabel(data.month)}.`;
+  $('budget-amount').value = data.budget === null ? '' : (data.budget/100).toFixed(2);
+  $('budget-error').textContent = '';
+  $('budget-dialog').showModal();
+}
+function openSubscription(identifier=null) {
+  if (!data) return;
+  editingSubscription=identifier;
+  const sub=data.subscriptions.find(sub=>sub.id===identifier);
+  $('subscription-title').textContent=sub?'Edit subscription':'Add subscription';
+  $('subscription-name').value=sub?.name || '';
+  $('subscription-amount').value=sub?(sub.amount/100).toFixed(2):'';
+  $('subscription-day').value=sub?.billing_day || 1;
+  $('subscription-active').checked=sub?Boolean(sub.active):true;
+  $('subscription-error').textContent='';
+  $('subscription-dialog').showModal();
+}
+async function saveForm(event, errorID, action) {
+  event.preventDefault();
+  const button=event.currentTarget.querySelector('button[type="submit"]');
+  button.disabled=true;
+  $(errorID).textContent='';
+  try {await action();} catch(error) {$(errorID).textContent=error.message;} finally {button.disabled=false;}
+}
+$('login-form').addEventListener('submit', event => saveForm(event,'login-error',async()=>{
+  await api('/login','POST',{password:$('password').value});
+  $('password').value='';
+  await refresh();
+}));
+$('logout').addEventListener('click',async()=>{try{await api('/logout','POST');showLogin();data=null;}catch(error){toast(error.message);}});
+$('refresh').addEventListener('click',refresh);
+$('month').addEventListener('change',()=>{if($('month').value) refresh();});
+$('add-expense').addEventListener('click',()=>openExpense());
+$('set-budget-stat').addEventListener('click',openBudget);
+$('edit-budget').addEventListener('click',openBudget);
+$('new-subscription').addEventListener('click',()=>openSubscription());
+$('search').addEventListener('input',renderTransactions);
+$('filter-category').addEventListener('change',renderTransactions);
+document.querySelectorAll('[data-chart]').forEach(button=>button.addEventListener('click',()=>{
+  chartMode=button.dataset.chart;
+  document.querySelectorAll('[data-chart]').forEach(b=>{b.classList.toggle('selected',b===button);b.setAttribute('aria-pressed',String(b===button));});
+  if(data) renderTrend();
+}));
+document.querySelectorAll('.close-dialog').forEach(button=>button.addEventListener('click',()=>button.closest('dialog').close()));
+document.querySelectorAll('[data-nav]').forEach(link=>link.addEventListener('click',()=>{
+  document.querySelectorAll('[data-nav]').forEach(l=>l.classList.toggle('active',l===link));
+}));
+$('expense-form').addEventListener('submit',event=>saveForm(event,'expense-error',async()=>{
+  const payload={amount:$('expense-amount').value,category:$('expense-category').value,spent_on:$('expense-date').value,note:$('expense-note').value};
+  await api(editingExpense?'/expenses/'+editingExpense:'/expenses',editingExpense?'PUT':'POST',payload);
+  $('expense-dialog').close();
+  await refresh();
+  toast('Expense saved');
+}));
+$('budget-form').addEventListener('submit',event=>saveForm(event,'budget-error',async()=>{
+  await api('/budgets/'+data.month,'PUT',{amount:$('budget-amount').value});
+  $('budget-dialog').close();await refresh();toast('Monthly budget saved');
+}));
+$('subscription-form').addEventListener('submit',event=>saveForm(event,'subscription-error',async()=>{
+  const payload={name:$('subscription-name').value,amount:$('subscription-amount').value,billing_day:Number($('subscription-day').value),active:$('subscription-active').checked};
+  await api(editingSubscription?'/subscriptions/'+editingSubscription:'/subscriptions',editingSubscription?'PUT':'POST',payload);
+  $('subscription-dialog').close();await refresh();toast('Subscription saved');
+}));
+$('delete-expense').addEventListener('click',()=>{
+  const row=data.expenses.find(row=>row.id===editingExpense);
+  $('confirm-description').textContent=`${row.note || data.categories.find(c=>c.id===row.category).label} · ${cash(row.amount)} · ${row.spent_on}`;
+  $('confirm-error').textContent='';
+  $('confirm-dialog').showModal();
+});
+$('cancel-delete').addEventListener('click',()=>$('confirm-dialog').close());
+$('confirm-delete').addEventListener('click',async()=>{
+  $('confirm-delete').disabled=true;
+  try {
+    await api('/expenses/'+editingExpense,'DELETE');
+    $('confirm-dialog').close();$('expense-dialog').close();await refresh();toast('Expense deleted');
+  }catch(error){$('confirm-error').textContent=error.message;}finally{$('confirm-delete').disabled=false;}
+});
+// Refresh when returning from Telegram, without disturbing an open edit or a search.
+document.addEventListener('visibilitychange',()=>{
+  if(!document.hidden && data && !document.querySelector('dialog[open]')) refresh();
+});
+refresh();
