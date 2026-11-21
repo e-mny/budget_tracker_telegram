@@ -62,9 +62,11 @@ TELEGRAM_NOTIFICATION_CHAT=group
 TELEGRAM_NOTIFICATION_THREAD_ID=0
 ```
 
-4. Recreate the Telegram worker to apply the environment changes. For the image deployment:
+4. Update the deployment files once, pull the published image, and recreate the Telegram worker. The new Compose variables must be present; an image update alone does not add them. For the image deployment:
 
 ```sh
+git pull --ff-only
+sudo docker compose -f compose.production.yaml pull telegram
 sudo docker compose -f compose.production.yaml up -d --no-build telegram
 ```
 
