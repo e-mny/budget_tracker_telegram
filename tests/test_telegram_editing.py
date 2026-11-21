@@ -317,3 +317,19 @@ def test_pending_submission_does_not_trigger_budget_alert(bot,ledger):
     assert ledger.pending_notifications(now)==[]
     click(bot,button(bot,'Confirm expense'))
     assert '100%' in ledger.pending_notifications(now)[0]['text']
+
+
+def test_invalid_large_expense_ids_do_not_block_worker(bot,ledger):
+    for index,value in enumerate(('/edit 9999999999999999999 5 food Test','/delete 9999999999999999999999999999','/delete 0')):
+        command(bot,value,update=index+1)
+        assert 'valid expense ID' in last_text(bot)
+    click(bot,'expense-delete:9999999999999999999999999999')
+    assert 'valid expense ID' in last_text(bot)
+    assert ledger.summary()['total']==12410
+
+
+def test_csv_draft_cannot_be_used_as_expense_editor(bot,ledger):
+    identifier=ledger.new_draft('csv',{'rows':[]})
+    command(bot,f'/edit {identifier} 5 food Test')
+    assert 'cannot be edited through Telegram' in last_text(bot)
+    assert ledger.summary()['total']==12410

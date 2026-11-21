@@ -10,6 +10,12 @@ def expense_payload(row):
     return {**{key:row.get(key) for key in EXPENSE_FIELDS},'amount':f"{row['amount']/100:.2f}"}
 
 
+def expense_identifier(text):
+    if not re.fullmatch(r'[0-9]{1,19}',text) or not 1<=int(text)<=9223372036854775807:
+        raise ValueError('Use a valid expense ID from /recent.')
+    return int(text)
+
+
 def parse_revision(text, previous):
     clear=re.search(r'\s+--original\s+none\s*$',text,re.I)
     if clear:text=text[:clear.start()]
@@ -132,11 +138,12 @@ class TelegramEditorMixin:
         target,_,text=args.strip().partition(' ')
         if not target:return self.recent_preview(message)
         if target.isdigit() and len(target)<=19:
-            old=self.ledger.expense(int(target));base=expense_payload(old)
+            old=self.ledger.expense(expense_identifier(target));base=expense_payload(old)
             payload=parse_revision(text,base) if text.strip() else base
             identifier=self.ledger.propose_expense('edit',payload,*self.context(message),request_key,identifier=old['id'])
         elif re.fullmatch(r'[0-9a-f]{24}',target):
             identifier=target;draft=self.ledger.draft(identifier)
+            if draft['kind'] not in ('telegram_expense','receipt'):raise ValueError('This draft cannot be edited through Telegram.')
             self.ledger.check_telegram_context(draft,*self.context(message))
             if text.strip():
                 payload=parse_revision(text,draft['payload'])
@@ -149,5 +156,5 @@ class TelegramEditorMixin:
         target=args.strip()
         if not target:return self.recent_preview(message)
         if not target.isdigit():raise ValueError('Use /delete EXPENSE_ID. Use /recent to find the ID.')
-        identifier=self.ledger.propose_expense('delete',None,*self.context(message),request_key,identifier=int(target))
+        identifier=self.ledger.propose_expense('delete',None,*self.context(message),request_key,identifier=expense_identifier(target))
         return self.proposal_preview(identifier,**self.destination(message))
