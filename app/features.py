@@ -175,7 +175,7 @@ class FeatureMixin:
             sub['next_due'] = due.isoformat() if due else None
         return {'category_budgets': limits,'goals': goals,'comparison': self.comparison(month),
                 'notification_settings': self.settings(),'upcoming_subscriptions': subs,
-                'annual_subscription_total': round(sum(annual_cost(s) for s in subs)),
+                'annual_subscription_total': round(sum(annual_cost(s) for s in subs if s['payment_type'] == 'expense')),
                 'currencies': list(CURRENCY_DIGITS)}
 
     def pending_notifications(self, now):
@@ -208,7 +208,8 @@ class FeatureMixin:
                     continue
                 key = f"renewal:{sub['id']}:{due}"
                 if key not in sent:
-                    result.append({'keys':[key], 'text':f"Penny · subscription renewal\n{sub['name']} · {money(sub['amount'])}\nDue {due}. Check your configured billing schedule in the dashboard."})
+                    title = 'investment contribution' if sub['payment_type'] == 'investment' else 'subscription renewal'
+                    result.append({'keys':[key], 'text':f"Penny · {title}\n{sub['name']} · {money(sub['amount'])}\nDue {due}. Check your configured billing schedule in the dashboard."})
         return result
 
     def mark_notification(self, keys, now):

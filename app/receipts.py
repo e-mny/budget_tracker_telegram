@@ -52,7 +52,7 @@ def parse_receipt(text):
             break
     cat='other'
     cues=[('food',r'cafe|coffee|restaurant|chicken|rice|supermarket|grocer|bakery|food|noodle'),
-          ('transport',r'taxi|grab ride|mrt|parking|petrol|transit'),('personal_care',r'salon|haircut|barber|facial'),
+          ('transport',r'taxi|grab ride|mrt|parking|petrol|transit'),('shopping',r'salon|haircut|barber|facial'),
           ('health',r'clinic|hospital|pharmacy|dental'),('shopping',r'clothing|apparel|shoes|fashion'),('travel',r'hotel|airline|flight')]
     for key,pattern in cues:
         if re.search(pattern,text,re.I):

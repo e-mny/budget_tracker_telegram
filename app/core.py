@@ -12,28 +12,10 @@ from zoneinfo import ZoneInfo
 from .features import FeatureMixin, currency_fields
 from .telegram_ledger import TelegramLedgerMixin
 from .recurrence import annual_cost, due_dates, start_date
+from .categories import CATEGORIES, ALIASES, migrate_categories
+from .contributions import initialize_contributions
 
 ZONE = ZoneInfo(os.getenv('TZ', 'Asia/Singapore'))
-CATEGORIES = {
-    'food': ('Food & drinks', '#7963ed'),
-    'transport': ('Transport', '#38a6ac'),
-    'travel': ('Travel', '#5385e8'),
-    'shopping': ('Shopping', '#ec9470'),
-    'subscription': ('Subscriptions', '#c38adb'),
-    'personal_care': ('Personal care', '#d3709c'),
-    'health': ('Health & medical', '#4baf8d'),
-    'fitness': ('Fitness & sports', '#8fbc52'),
-    'entertainment': ('Entertainment', '#e6b34d'),
-    'social': ('Social & dates', '#db7c65'),
-    'gifts': ('Gifts & donations', '#8b9fdd'),
-    'home': ('Home & utilities', '#829399'),
-    'education': ('Learning & career', '#63a1cd'),
-    'insurance': ('Insurance', '#a293c4'),
-    'other': ('Other', '#9ca3af'),
-}
-ALIASES = {'subscriptions': 'subscription', 'personal-care': 'personal_care',
-           'personalcare': 'personal_care', 'dining': 'food', 'groceries': 'food',
-           'medical': 'health', 'gym': 'fitness', 'dates': 'social', 'learning': 'education'}
 
 
 def today():
@@ -119,9 +101,14 @@ class Ledger(FeatureMixin, TelegramLedgerMixin):
             columns = {row['name'] for row in db.execute('PRAGMA table_info(subscriptions)')}
             for name, definition in (('interval_count', 'INTEGER NOT NULL DEFAULT 1'),
                                      ('interval_unit', "TEXT NOT NULL DEFAULT 'months'"),
+                                     ('category', "TEXT NOT NULL DEFAULT 'home'"),
+                                     ('payment_type', "TEXT NOT NULL DEFAULT 'expense'"),
                                      ('start_date', 'TEXT'), ('schedule_effective_from', 'TEXT')):
                 if name not in columns:
                     db.execute(f'ALTER TABLE subscriptions ADD COLUMN {name} {definition}')
+            if 'category' not in columns:
+                # Old subscriptions had no category field; classify their known names.
+                db.execute("UPDATE subscriptions SET category='subscription'")
             self.initialize_features(db)
             self.initialize_telegram(db)
             if not db.execute("SELECT 1 FROM meta WHERE key='start_month'").fetchone():
@@ -129,6 +116,9 @@ class Ledger(FeatureMixin, TelegramLedgerMixin):
                 db.execute("INSERT INTO meta VALUES ('start_month',?)", (start,))
                 db.executemany('INSERT INTO subscriptions(name,amount,billing_day,start_month) VALUES (?,?,1,?)',
                                [('Gym membership', 9800, start), ('Phone plan', 1010, start), ('Netflix', 1600, start)])
+                db.execute("UPDATE subscriptions SET category='subscription'")
+            migrate_categories(db)
+            initialize_contributions(db, today())
 
     def sync_subscriptions(self, as_of=None):
         as_of = as_of or today()
@@ -140,11 +130,18 @@ class Ledger(FeatureMixin, TelegramLedgerMixin):
         for sub in db.execute('SELECT * FROM subscriptions WHERE active=1').fetchall():
             for due in due_dates(sub, start_date(sub), as_of):
                 period = due.isoformat() if sub['interval_unit'] in ('days', 'weeks') else due.strftime('%Y-%m')
+                if sub['payment_type'] == 'investment':
+                    db.execute('''INSERT OR IGNORE INTO investment_contributions(amount,note,invested_on,source_key)
+                        SELECT ?,?,?,? WHERE NOT EXISTS
+                        (SELECT 1 FROM investment_contributions WHERE source_key LIKE ? AND invested_on=?)''',
+                        (sub['amount'], sub['name'], due.isoformat(), f"investment:{sub['id']}:{period}",
+                         f"investment:{sub['id']}:%", due.isoformat()))
+                    continue
                 # Preserve existing monthly keys, including deleted and edited entries.
                 db.execute('''INSERT OR IGNORE INTO expenses(amount,category,note,spent_on,source,source_key)
-                    SELECT ?,'subscription',?,?,'subscription',? WHERE NOT EXISTS
+                    SELECT ?,?,?,?,'subscription',? WHERE NOT EXISTS
                     (SELECT 1 FROM expenses WHERE source_key LIKE ? AND spent_on=?)''',
-                    (sub['amount'], sub['name'], due.isoformat(), f"subscription:{sub['id']}:{period}",
+                    (sub['amount'], sub['category'], sub['name'], due.isoformat(), f"subscription:{sub['id']}:{period}",
                      f"subscription:{sub['id']}:%", due.isoformat()))
 
     def validate_expense(self, payload):
@@ -212,6 +209,12 @@ class Ledger(FeatureMixin, TelegramLedgerMixin):
             old = db.execute('SELECT * FROM subscriptions WHERE id=?', (identifier,)).fetchone() if identifier is not None else None
             if identifier is not None and old is None:
                 raise LookupError('Subscription not found.')
+            cat = category(payload.get('category', old['category'] if old else 'home'))
+            kind = payload.get('payment_type', old['payment_type'] if old else 'expense')
+            if kind not in ('expense', 'investment'):
+                raise ValueError('Payment type must be expense or investment.')
+            if old and kind != old['payment_type']:
+                raise ValueError('Create a new recurring payment to change between expenses and investments.')
             count = payload.get('interval_count', old['interval_count'] if old else 1)
             unit = payload.get('interval_unit', old['interval_unit'] if old else 'months')
             if type(count) is not int or not 1 <= count <= 120:
@@ -236,12 +239,12 @@ class Ledger(FeatureMixin, TelegramLedgerMixin):
             self._sync_subscriptions(db, today())
             if identifier is None:
                 db.execute('''INSERT INTO subscriptions(name,amount,billing_day,active,start_month,
-                           interval_count,interval_unit,start_date,schedule_effective_from) VALUES (?,?,?,?,?,?,?,?,?)''',
-                           (name.strip(), amount, day, int(active), anchor[:7], count, unit, anchor, effective))
+                           interval_count,interval_unit,start_date,schedule_effective_from,category,payment_type) VALUES (?,?,?,?,?,?,?,?,?,?,?)''',
+                           (name.strip(), amount, day, int(active), anchor[:7], count, unit, anchor, effective, cat, kind))
             else:
                 db.execute('''UPDATE subscriptions SET name=?,amount=?,billing_day=?,active=?,interval_count=?,
-                           interval_unit=?,start_date=?,schedule_effective_from=? WHERE id=?''',
-                           (name.strip(), amount, day, int(active), count, unit, anchor, effective, identifier))
+                           interval_unit=?,start_date=?,schedule_effective_from=?,category=? WHERE id=?''',
+                           (name.strip(), amount, day, int(active), count, unit, anchor, effective, cat, identifier))
             self._sync_subscriptions(db, today())
 
     def summary(self, month=None):
@@ -254,6 +257,8 @@ class Ledger(FeatureMixin, TelegramLedgerMixin):
             rows = [dict(r) for r in db.execute('SELECT * FROM expenses WHERE deleted=0 AND spent_on BETWEEN ? AND ? ORDER BY spent_on DESC,id DESC',
                                               (first.isoformat(), last.isoformat()))]
             budget = db.execute('SELECT * FROM budgets WHERE month<=? ORDER BY month DESC LIMIT 1', (month,)).fetchone()
+            investments = [dict(r) for r in db.execute('''SELECT * FROM investment_contributions
+                WHERE invested_on BETWEEN ? AND ? ORDER BY invested_on DESC,id DESC''', (first.isoformat(), last.isoformat()))]
             subs = [dict(r) for r in db.execute('SELECT * FROM subscriptions ORDER BY id')]
             for sub in subs:
                 sub['start_date'] = start_date(sub).isoformat()
@@ -273,7 +278,10 @@ class Ledger(FeatureMixin, TelegramLedgerMixin):
                 'categories': [{'id': key, 'label': label, 'color': color, 'amount': totals[key]} for key, (label, color) in CATEGORIES.items()],
                 'daily': [{'day': day, 'amount': value} for day, value in daily.items()],
                 'expenses': rows, 'subscriptions': subs, 'start_month': start_month,
-                'subscription_total': round(sum(annual_cost(s) for s in subs if s['active']) / 12), **self.feature_summary(month)}
+                'subscription_total': round(sum(annual_cost(s) for s in subs if s['active'] and s['payment_type'] == 'expense') / 12),
+                'investment_total': sum(r['amount'] for r in investments), 'investment_contributions': investments,
+                'monthly_investment_commitment': round(sum(annual_cost(s) for s in subs if s['active'] and s['payment_type'] == 'investment') / 12),
+                **self.feature_summary(month)}
 
     def get_state(self, key, default=None):
         with self.db() as db:

@@ -150,7 +150,11 @@ function billingLabel(sub) {
   return sub.interval_count === 1 ? `Every ${singular}` : `Every ${sub.interval_count} ${sub.interval_unit}`;
 }
 function renderSubscriptions() {
-  $('subscription-list').innerHTML = data.subscriptions.map(sub => `<button class="subscription-row ${sub.active?'':'inactive'}" data-subscription="${sub.id}" aria-label="Edit subscription ${escapeHTML(sub.name)}"><span class="sub-icon">${escapeHTML(sub.name.slice(0,1).toUpperCase())}</span><span class="sub-copy"><strong>${escapeHTML(sub.name)}</strong><small>${sub.active ? escapeHTML(billingLabel(sub)) : 'Paused'}</small></span><span class="sub-amount">${cash(sub.amount)} / ${escapeHTML(sub.interval_count === 1 ? ({days:'day',weeks:'week',months:'month',years:'year'}[sub.interval_unit]) : sub.interval_count + ' ' + sub.interval_unit)}</span></button>`).join('');
+  $('subscription-list').innerHTML = data.subscriptions.map(sub => {
+    const due = data.upcoming_subscriptions.find(item=>item.id===sub.id)?.next_due;
+    const label = sub.payment_type === 'investment' ? 'Investment' : data.categories.find(cat=>cat.id===sub.category)?.label;
+    return `<button class="subscription-row ${sub.active?'':'inactive'}" data-subscription="${sub.id}" aria-label="Edit recurring payment ${escapeHTML(sub.name)}"><span class="sub-icon">${escapeHTML(sub.name.slice(0,1).toUpperCase())}</span><span class="sub-copy"><strong>${escapeHTML(sub.name)}</strong><small>${escapeHTML(label)} · ${sub.active ? escapeHTML(billingLabel(sub)) + (due?' · Next '+dateLabel(due):'') : 'Paused'}</small></span><span class="sub-amount">${cash(sub.amount)}</span></button>`;
+  }).join('');
   $('subscription-total').textContent = cash(data.subscription_total) + ' / month';
   $('annual-commitment').textContent = `Estimated annual commitment: ${cash(data.annual_subscription_total)}. Next: ${data.upcoming_subscriptions.filter(s=>s.next_due).sort((a,b)=>a.next_due.localeCompare(b.next_due)).slice(0,1).map(s=>s.name+' · '+dateLabel(s.next_due)).join('') || 'No active renewals'}. Day/week estimates use a 365-day year.`;
   $('subscription-list').querySelectorAll('[data-subscription]').forEach(button => button.addEventListener('click', () => openSubscription(Number(button.dataset.subscription))));
@@ -200,9 +204,14 @@ function openSubscription(identifier=null) {
   if (!data) return;
   editingSubscription=identifier;
   const sub=data.subscriptions.find(sub=>sub.id===identifier);
-  $('subscription-title').textContent=sub?'Edit subscription':'Add subscription';
+  $('subscription-title').textContent=sub?'Edit recurring payment':'Add recurring payment';
   $('subscription-name').value=sub?.name || '';
   $('subscription-amount').value=sub?(sub.amount/100).toFixed(2):'';
+  $('subscription-category').innerHTML=data.categories.map(cat=>`<option value="${cat.id}">${escapeHTML(cat.label)}</option>`).join('');
+  $('subscription-category').value=sub?.category || 'home';
+  $('subscription-type').value=sub?.payment_type || 'expense';
+  $('subscription-type').disabled=Boolean(sub);
+  updatePaymentType();
   $('subscription-interval').value=sub?.interval_count || 1;
   $('subscription-unit').value=sub?.interval_unit || 'months';
   $('subscription-start').value=sub?.start_date || data.today;
@@ -210,6 +219,12 @@ function openSubscription(identifier=null) {
   $('subscription-error').textContent='';
   $('subscription-dialog').showModal();
 }
+function updatePaymentType() {
+  const investment = $('subscription-type').value === 'investment';
+  $('subscription-category-field').hidden=investment;
+  $('subscription-category').disabled=investment;
+}
+$('subscription-type').addEventListener('change',updatePaymentType);
 async function saveForm(event, errorID, action) {
   event.preventDefault();
   const button=event.currentTarget.querySelector('button[type="submit"]');
@@ -253,9 +268,9 @@ $('budget-form').addEventListener('submit',event=>saveForm(event,'budget-error',
   $('budget-dialog').close();await refresh();toast('Monthly budget saved');
 }));
 $('subscription-form').addEventListener('submit',event=>saveForm(event,'subscription-error',async()=>{
-  const payload={name:$('subscription-name').value,amount:$('subscription-amount').value,interval_count:Number($('subscription-interval').value),interval_unit:$('subscription-unit').value,start_date:$('subscription-start').value,active:$('subscription-active').checked};
+  const payload={name:$('subscription-name').value,amount:$('subscription-amount').value,payment_type:$('subscription-type').value,category:$('subscription-type').value==='investment'?'other':$('subscription-category').value,interval_count:Number($('subscription-interval').value),interval_unit:$('subscription-unit').value,start_date:$('subscription-start').value,active:$('subscription-active').checked};
   await api(editingSubscription?'/subscriptions/'+editingSubscription:'/subscriptions',editingSubscription?'PUT':'POST',payload);
-  $('subscription-dialog').close();await refresh();toast('Subscription saved');
+  $('subscription-dialog').close();await refresh();toast('Recurring payment saved');
 }));
 $('delete-expense').addEventListener('click',()=>{
   const row=data.expenses.find(row=>row.id===editingExpense);
@@ -276,7 +291,7 @@ document.addEventListener('visibilitychange',()=>{
   if(!document.hidden && data && !document.querySelector('dialog[open]')) refresh();
 });
 function renderFeatures() {
-  renderComparison(); renderLimits(); renderGoals();
+  renderComparison(); renderLimits(); renderGoals(); renderInvestments();
   const settings=data.notification_settings;
   $('alerts-body').innerHTML=`<div class="notification-line"><span class="notification-icon">◎</span><div><strong>Budget alerts ${settings.budget_alerts?'on':'off'}</strong><p>${settings.thresholds.join('%, ')}% of monthly and category limits. Sent once per threshold each month.</p></div></div><div class="notification-line"><span class="notification-icon">↻</span><div><strong>Renewal reminders ${settings.renewal_reminders?'on':'off'}</strong><p>${settings.reminder_days} day${settings.reminder_days===1?'':'s'} before configured billing dates, after 09:00. Telegram worker required.</p></div></div>`;
 }
@@ -312,6 +327,9 @@ function renderGoals() {
     $('contribution-goal-name').textContent=data.goals.find(g=>g.id===contributingGoal).name;
     $('contribution-amount').value='';$('contribution-error').textContent='';$('contribution-dialog').showModal();
   }));
+}
+function renderInvestments() {
+  $('investments-body').innerHTML=`<div class="comparison-totals"><div><span>Invested in ${monthLabel(data.month)}</span><strong>${cash(data.investment_total)}</strong></div><div><span>Monthly commitment</span><strong>${cash(data.monthly_investment_commitment)}</strong></div></div><p class="empty-inline">Investment contributions are separate from spending and your expense budget.</p>${data.investment_contributions.map(row=>`<div class="investment-row"><span>${escapeHTML(row.note)}<small>${dateLabel(row.invested_on)}</small></span><strong>${cash(row.amount)}</strong></div>`).join('') || '<p class="empty-inline">No investment contributions recorded this month.</p>'}`;
 }
 function openGoal(identifier=null) {
   editingGoal=identifier;

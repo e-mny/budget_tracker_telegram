@@ -51,7 +51,7 @@ def test_future_anchor_next_due_and_estimated_totals(ledger):
     summary = ledger.summary()
     assert charges(ledger, 'Annual') == charges(ledger, 'Quarterly') == charges(ledger, 'Weekly') == []
     assert next(s['next_due'] for s in summary['upcoming_subscriptions'] if s['name'] == 'Annual') == '2028-05-12'
-    annual = 12410 * 12 + 12000 + 3000 * 4 + 36500
+    annual = (12410 + 40120) * 12 + 12000 + 3000 * 4 + 36500
     assert summary['annual_subscription_total'] == annual
     assert summary['subscription_total'] == round(annual / 12)
 
@@ -111,7 +111,7 @@ def test_migrates_monthly_schedule_and_deleted_keys(tmp_path, monkeypatch):
     ledger = Ledger(path)
     assert ledger.summary()['subscriptions'][0]['interval_unit'] == 'months'
     assert [r['spent_on'] for r in charges(ledger, 'Old plan')] == ['2027-02-28']
-    assert Ledger(path).summary()['total'] == 1000
+    assert Ledger(path).summary()['total'] == 1000 + 40120
     # Saving a migrated schedule keeps the original day 31 after February.
     ledger.save_subscription(1, {'name': 'Old plan', 'amount': '10', 'start_date': '2027-01-31'})
     monkeypatch.setattr(core, 'today', lambda: date(2027, 3, 31))
@@ -141,3 +141,37 @@ def test_subscription_api_roundtrip(ledger, monkeypatch):
         assert (sub['interval_count'], sub['interval_unit'], sub['start_date']) == (1, 'years', '2027-03-12')
         assert client.put(f"/api/subscriptions/{sub['id']}", headers=headers, json={**payload, 'interval_count': 2}).status_code == 200
         assert client.post('/api/subscriptions', headers=headers, json={**payload, 'interval_count': 0}).status_code == 422
+
+
+def test_recurring_household_contribution_uses_selected_category(ledger, monkeypatch):
+    ledger.save_subscription(None, {'name': 'Household allowance', 'amount': '401.20',
+                                   'category': 'home', 'start_date': '2026-11-21'})
+    summary = ledger.summary()
+    sub = next(s for s in summary['subscriptions'] if s['name'] == 'Household allowance')
+    assert sub['category'] == 'home'
+    assert next(c['amount'] for c in summary['categories'] if c['id'] == 'home') == 40120 + 1010
+    assert summary['total'] == 12410 + 40120
+    # Existing clients can omit category when updating the payment.
+    ledger.save_subscription(sub['id'], {'name': 'Household allowance', 'amount': '401.20'})
+    monkeypatch.setattr(core, 'today', lambda: date(2026, 12, 21))
+    reopened = Ledger(ledger.path)
+    reopened.sync_subscriptions()
+    rows = charges(reopened, 'Household allowance')
+    assert [(r['spent_on'], r['amount'], r['category']) for r in rows] == [
+        ('2026-11-21', 40120, 'home'), ('2026-12-21', 40120, 'home')]
+
+
+def test_recurring_category_edit_preserves_recorded_history(ledger, monkeypatch):
+    sub = ledger.summary()['subscriptions'][0]
+    ledger.save_subscription(sub['id'], {'name': sub['name'], 'amount': '98', 'category': 'home'})
+    assert charges(ledger, sub['name'])[0]['category'] == 'health'
+    monkeypatch.setattr(core, 'today', lambda: date(2026, 12, 1))
+    ledger.sync_subscriptions()
+    assert charges(ledger, sub['name'])[-1]['category'] == 'home'
+
+
+def test_invalid_recurring_category_rejects_update(ledger):
+    sub = ledger.summary()['subscriptions'][0]
+    with pytest.raises(ValueError):
+        ledger.save_subscription(sub['id'], {'name': 'Bad category', 'amount': '98', 'category': 'unknown'})
+    assert ledger.summary()['subscriptions'][0] == sub

@@ -45,6 +45,8 @@ def summary_text(summary):
         lines.append(f"{'Remaining' if summary['remaining'] >= 0 else 'Over budget'}: {money(abs(summary['remaining']))}")
     else:
         lines.append('Monthly budget: not set. Set it in the dashboard.')
+    if summary.get('investment_total'):
+        lines.append(f"Invested separately: {money(summary['investment_total'])} (excluded from spending)")
     for cat in sorted(summary['categories'], key=lambda c: c['amount'], reverse=True):
         if cat['amount']:
             lines.append(f"{cat['label']}: {money(cat['amount'])} ({cat['amount'] / summary['total']:.0%})")

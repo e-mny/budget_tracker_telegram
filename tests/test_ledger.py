@@ -48,7 +48,7 @@ def test_cents_sum_without_float_drift(ledger):
 
 def test_parser_and_date(ledger):
     payload = parse_add('S$12.50 personal-care Haircut @2026-11-20')
-    assert payload == {'amount':'12.50','category':'personal_care','note':'Haircut','spent_on':'2026-11-20'}
+    assert payload == {'amount':'12.50','category':'shopping','note':'Haircut','spent_on':'2026-11-20'}
     assert parse_add('2 transport', date(2026,10,31))['spent_on'] == '2026-10-31'
     for text in ['12', '12 unknown x', '1.001 food x', '1 food x @bad']:
         with pytest.raises(ValueError):
@@ -88,11 +88,11 @@ def test_short_month_and_recurring_catchup(ledger, monkeypatch):
     monkeypatch.setattr(core, 'today', lambda: date(2027, 2, 28))
     ledger.sync_subscriptions()
     result=ledger.summary('2027-02')
-    assert result['total'] == 14410
+    assert result['total'] == 14410 + 40120
     assert next(e for e in result['expenses'] if e['note']=='Test')['spent_on'] == '2027-02-28'
-    assert ledger.summary('2026-12')['total'] == 14410
+    assert ledger.summary('2026-12')['total'] == 14410 + 40120
     ledger.sync_subscriptions()
-    assert ledger.summary('2027-02')['count'] == 4
+    assert ledger.summary('2027-02')['count'] == 5
 
 
 def test_subscription_edits_preserve_posted_entries(ledger, monkeypatch):
