@@ -128,6 +128,8 @@ def test_bot_allowlist_duplicate_updates_and_recap_delivery(ledger, monkeypatch)
     bot = Bot(ledger, 'test-token', 123)
     sent=[]
     monkeypatch.setattr(bot,'send',sent.append)
+    calls=[]
+    monkeypatch.setattr(bot,'telegram',lambda method,**payload: calls.append((method,payload)) or {'message_id':len(calls)})
     update={'update_id':10,'message':{'text':'/add 2 food Lunch','from':{'id':999},'chat':{'id':123,'type':'private'}}}
     bot.process_update(update)
     assert not sent
@@ -138,6 +140,10 @@ def test_bot_allowlist_duplicate_updates_and_recap_delivery(ledger, monkeypatch)
     update['message']['chat']['type']='private'
     bot.process_update(update)
     bot.process_update(update)
+    assert ledger.summary()['total'] == 12410
+    data=calls[-1][1]['reply_markup']['inline_keyboard'][0][0]['callback_data']
+    callback={'callback_query':{'id':'confirm','from':{'id':123},'message':{'chat':{'id':123,'type':'private'}},'data':data}}
+    bot.process_update(callback);bot.process_update(callback)
     assert ledger.summary()['total'] == 12610
     bot.process_update({'update_id':11,'message':{'text':'/add 1.001 food no','from':{'id':123},'chat':{'id':123,'type':'private'}}})
     assert 'two decimal places' in sent[-1]

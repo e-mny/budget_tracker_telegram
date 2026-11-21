@@ -10,6 +10,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from .features import FeatureMixin, currency_fields
+from .telegram_ledger import TelegramLedgerMixin
 
 ZONE = ZoneInfo(os.getenv('TZ', 'Asia/Singapore'))
 CATEGORIES = {
@@ -74,7 +75,7 @@ def money(value):
     return f'S${value / 100:,.2f}'
 
 
-class Ledger(FeatureMixin):
+class Ledger(FeatureMixin, TelegramLedgerMixin):
     def __init__(self, path=None):
         self.path = Path(path or Path(os.getenv('DATA_DIR', 'data')) / 'ledger.sqlite3')
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -115,6 +116,7 @@ class Ledger(FeatureMixin):
             # BEGIN IMMEDIATE also serializes simultaneous first starts of web and bot.
             db.execute('BEGIN IMMEDIATE')
             self.initialize_features(db)
+            self.initialize_telegram(db)
             if not db.execute("SELECT 1 FROM meta WHERE key='start_month'").fetchone():
                 start = today().strftime('%Y-%m')
                 db.execute("INSERT INTO meta VALUES ('start_month',?)", (start,))

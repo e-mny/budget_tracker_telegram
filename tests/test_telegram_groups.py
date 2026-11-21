@@ -39,10 +39,14 @@ def test_group_add_reply_and_dedup(ledger,monkeypatch,kind):
     bot,calls=make_bot(ledger,monkeypatch)
     update=message('/add@PennyBot 6.50 food Lunch',kind=kind)
     bot.process_update(update);bot.process_update(update)
-    assert ledger.summary()['total']==13060
+    assert ledger.summary()['total']==12410
     assert len(calls)==2
-    assert all(call[1]['chat_id']==GROUP and call[1]['message_thread_id']==7 for call in calls)
-    assert 'Saved #' in calls[0][1]['text']
+    data=calls[-1][1]['reply_markup']['inline_keyboard'][0][0]['callback_data']
+    query={'callback_query':{'id':'confirm-add','from':{'id':OWNER},'message':{'chat':{'id':GROUP,'type':kind},'message_thread_id':7},'data':data}}
+    bot.process_update(query);bot.process_update(query)
+    assert ledger.summary()['total']==13060
+    assert all(call[1]['chat_id']==GROUP and call[1]['message_thread_id']==7 for call in calls if call[0]=='sendMessage')
+    assert 'Saved #' in calls[-3][1]['text']
 
 
 @pytest.mark.parametrize('user,chat,kind',[(999,GROUP,'supergroup'),(OWNER,-100999,'supergroup'),(OWNER,GROUP,'channel'),(999,999,'private')])
@@ -55,6 +59,9 @@ def test_other_users_chats_and_channels_are_ignored(ledger,monkeypatch,user,chat
 def test_private_chat_still_works_with_group_configured(ledger,monkeypatch):
     bot,calls=make_bot(ledger,monkeypatch)
     bot.process_update(message('/add 2.20 transport MRT',chat=OWNER,kind='private',topic=0))
+    assert ledger.summary()['total']==12410
+    data=calls[0][1]['reply_markup']['inline_keyboard'][0][0]['callback_data']
+    bot.process_update({'callback_query':{'id':'private-confirm','from':{'id':OWNER},'message':{'chat':{'id':OWNER,'type':'private'}},'data':data}})
     assert ledger.summary()['total']==12630
     assert calls[0][1]['chat_id']==OWNER and 'message_thread_id' not in calls[0][1]
 
@@ -131,7 +138,7 @@ def test_receipt_upload_binds_preview_to_chat_topic(ledger,monkeypatch):
     bot.process_update(update)
     assert len(calls)==1 and calls[0][1]['chat_id']==GROUP and calls[0][1]['message_thread_id']==7
     keyboard=calls[0][1]['reply_markup']['inline_keyboard'][0]
-    identifier=keyboard[0]['callback_data'].split(':',1)[1]
+    identifier=keyboard[0]['callback_data'].split(':')[1]
     payload=ledger.draft(identifier,'receipt')['payload']
     assert payload['_telegram_chat_id']==GROUP and payload['_telegram_thread_id']==7
     assert ledger.summary()['total']==12410
@@ -176,7 +183,7 @@ def test_group_receipt_edit_and_cancel(ledger,monkeypatch):
     bot.process_update(message(f'/receipt@PennyBot {identifier} 6.50 food Corrected receipt'))
     assert ledger.draft(identifier,'receipt')['payload']['amount']=='6.50'
     assert calls[-1][1]['chat_id']==GROUP and 'Corrected receipt' in calls[-1][1]['text']
-    bot.process_update(callback(identifier,action='receipt-cancel'))
+    bot.process_update(callback(identifier+':2',action='receipt-cancel'))
     assert ledger.draft(identifier,'receipt')['status']=='cancelled'
     assert ledger.summary()['total']==12410
 

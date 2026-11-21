@@ -14,7 +14,7 @@ A private, self-hosted expense tracker with a desktop dashboard and a personal T
 - Subscription renewal reminders (default 3 days ahead, after 09:00), plus annual commitment and next billing dates.
 - Travel currency records: original currency/amount and the actual SGD amount charged. No guessed exchange rate.
 - GitHub Actions publishes a tested image on pushes to `main`; a separate Proxmox timer can install updates every five minutes.
-- Add, edit, and delete expenses in the dashboard, or submit categorized expenses through Telegram.
+- Add, edit, and delete expenses in the dashboard or Telegram. Telegram submissions, edits and deletions require confirmation.
 - Monthly recurring subscriptions, auto-recorded on the billing day.
 - Billing days initially **1**, editable in the dashboard. Entries begin in the month the database is first created. No earlier expenses are invented.
 - A Telegram recap with a category chart at **23:59 on the last day of each month**, using **Asia/Singapore** time. Missed recaps are delivered after the worker comes back online.
@@ -82,10 +82,16 @@ See [Telegram's group privacy rules](https://core.telegram.org/bots/features#pri
 
 | Command | What it does |
 | --- | --- |
-| `/add 6.50 food Chicken rice` | Save a food expense today |
-| `/add 2.20 transport MRT` | Save a transport expense |
-| `/add 45 personal_care Haircut @2026-11-20` | Save a past-dated expense |
+| `/add 6.50 food Chicken rice` | Preview a new food expense; confirm before saving |
+| `/add 2.20 transport MRT` | Preview a transport expense |
+| `/add 45 personal_care Haircut @2026-11-20` | Preview a past-dated expense |
 | `/whoami` | Show your user, chat and topic IDs for setup |
+| `/recent` | Browse saved expenses with Edit/Delete buttons and pagination |
+| `/recent 2026-10` | Browse a specific month's saved expenses |
+| `/edit 42` | Start a reply-based edit of expense #42 |
+| `/edit 42 7.50 food Corrected lunch` | Preview replacement values for expense #42 |
+| `/delete 42` | Review and explicitly confirm deletion of expense #42 |
+| `/cancel DRAFT_ID` | Discard a pending proposal without changing expenses |
 | `/categories` | List category names and descriptions |
 | `/month` | Current month total, categories, and remaining budget |
 | `/recap` | Send this month's recap and PNG chart now |
@@ -95,11 +101,30 @@ See [Telegram's group privacy rules](https://core.telegram.org/bots/features#pri
 | `/add 25 travel Lunch --original USD 18.50` | Record the actual SGD charge and original foreign amount |
 | `/help` | Show command help |
 
-`/add` saves immediately and returns the entry ID and monthly total. Correct mistakes using the dashboard's edit icon. Amounts must be positive with at most two decimal places. Dates use the configured local timezone; future expenses are rejected. Messages delayed by a restart use the original Telegram message date unless you provide an explicit date.
+`/add` creates a durable pending proposal and shows **Confirm expense**, **Edit**, and **Cancel**. Nothing is recorded or counted towards budgets until you tap Confirm expense. Edit opens a reply prompt with the current entry to copy and change; your reply creates a new preview that must be confirmed again. Cancel discards the proposal. A confirmed entry returns its expense ID and Edit/Delete buttons.
+
+Use `/recent` to find saved entries, including dashboard/CSV/receipt/automatic entries, or use `/edit ID` and `/delete ID` directly. **Edits show proposed and currently recorded values before Confirm changes. Deletions show the recorded entry before Confirm delete.** The amount, category, description, date and original currency can be changed from Telegram. An omitted edit date or original-currency flag keeps its recorded value; `--original none` removes the original currency. The supplied description replaces the old one (omit it to clear the description).
+
+For example:
+
+```text
+/add 6.50 food Lunch
+# Tap Edit, then reply: 7.50 food Corrected lunch
+# Tap Confirm expense
+/recent
+/edit 42 8.50 food Corrected lunch @2026-11-20
+# Tap Confirm changes
+/delete 42
+# Tap Confirm delete
+```
+
+Pending proposals and edit prompts survive restarts and expire after seven days. Buttons are restricted to your user, original chat and topic. Superseded previews are rejected. If an expense changes in the dashboard or another confirmed edit after you preview it, the bot asks you to review its latest values instead of overwriting the change. Repeated confirmations are idempotent. Pending entries do not affect spending, charts, or budget alerts. Recorded expense changes use the same ledger as the dashboard.
+
+Amounts must be positive with at most two decimal places. Dates use the configured local timezone; future expenses are rejected. Messages delayed by a restart use the original Telegram message date unless you provide an explicit date.
 
 Categories: `food` (including groceries), `transport`, `travel`, `shopping`, `subscription`, `personal_care`, `health`, `fitness`, `entertainment`, `social` (including dates), `gifts` (including donations), `home` (including utilities), `education` (learning/career), `insurance`, and `other`. Your gym membership is initially in subscriptions; one-off sports purchases can use fitness.
 
-Automatic subscription entries already count towards the total and budget. **Do not submit those same charges again through `/add`.** Pausing a subscription stops future unrecorded charges and retains history. Days 29–31 are clamped to the last day of shorter months. Deleting an automatic entry removes it from spending and prevents it from being recreated for that month.
+Automatic subscription entries already count towards the total and budget. **Do not submit those same charges again through `/add`.** Pausing a subscription stops future unrecorded charges and retains history. Days 29–31 are clamped to the last day of shorter months. Deleting an automatic entry removes it from spending and prevents it from being recreated for that month. Future recurring charges continue; change the subscription settings in the dashboard to pause future billing.
 
 ## Monthly recap behavior
 
@@ -155,7 +180,7 @@ Tests use isolated temporary databases and a fixed calendar. They cover exact mo
 
 **CSV:** Use the Receipts & data panel to export this month or all records. Import UTF-8 CSV with `spent_on,amount,category,note,original_currency,original_amount` headers (the last three are optional). Dates are YYYY-MM-DD, and `amount` is the actual SGD charge. Maximum 2 MB / 5,000 rows. The preview validates every row before saving and shows the first 100; confirmation imports all valid file rows atomically. Exact matching records, including deleted records, are skipped; multiple identical rows in a new file retain their multiplicity. Exported descriptions are escaped against spreadsheet formulas and can be imported back. CSV exports contain expenses, not budgets, goals, settings, or passwords; use a volume backup for those.
 
-**Receipts:** Upload a JPG, PNG or WebP (10 MB / 25 MP maximum) in the dashboard or send it to the bot. Tesseract runs locally, using English OCR; low-quality or non-English receipts may need manual corrections. Review the merchant, amount, date, and category. The dashboard lets you edit all fields before Save expense; the bot lets you correct via `/receipt`, then explicitly tap Save receipt. Foreign receipts require the actual SGD charge before saving. Photos are used temporarily for OCR, then removed; review text and drafts expire after seven days. Receipt extraction is a suggestion and does not confirm a bank charge.
+**Receipts:** Upload a JPG, PNG or WebP (10 MB / 25 MP maximum) in the dashboard or send it to the bot. Tesseract runs locally, using English OCR; low-quality or non-English receipts may need manual corrections. Review the merchant, amount, date, and category. The dashboard lets you edit all fields before Save expense; the bot provides Edit and Save receipt buttons, or `/receipt DRAFT_ID ...` / `/edit DRAFT_ID ...` for corrections. Each revision has a new confirmation; old buttons cannot save newer values unseen. Foreign receipts require the actual SGD charge before saving. Photos are used temporarily for OCR, then removed; review text and drafts expire after seven days. Receipt extraction is a suggestion and does not confirm a bank charge.
 
 **Savings:** Create a goal with a target, optional date, and already-saved amount; record contributions or edit the saved total. These are manual progress records and never add an expense or change your spending budget.
 

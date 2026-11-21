@@ -236,7 +236,7 @@ class FeatureMixin:
         with self.db() as db:
             row = db.execute('SELECT * FROM drafts WHERE id=? AND expires>?',(identifier,int(time.time()))).fetchone()
         if not row or (kind and row['kind']!=kind):
-            raise LookupError('Draft not found or expired. Upload the file again.')
+            raise LookupError('Draft not found or expired. Start a new request.')
         result = dict(row)
         result['payload'] = json.loads(result['payload'])
         return result
@@ -248,10 +248,10 @@ class FeatureMixin:
             if not row:
                 raise LookupError('Draft not found or expired.')
             if row['status'] == 'saved':
-                raise ValueError('This draft was already saved. Edit or delete its expense in the dashboard.')
+                raise ValueError('This draft was already saved. Use /edit or /delete in Telegram, or edit it in the dashboard.')
             db.execute("UPDATE drafts SET status='cancelled' WHERE id=? AND status='pending'",(identifier,))
 
-    def confirm_receipt(self, identifier, payload):
+    def confirm_receipt(self, identifier, payload, expected_version=None):
         self.validate_expense(payload)
         currency_fields(payload)
         # Expense insert and draft consumption share a transaction: cancellation/retry cannot race saving.
@@ -260,6 +260,8 @@ class FeatureMixin:
             row = db.execute('SELECT * FROM drafts WHERE id=? AND kind=\'receipt\' AND expires>?',(identifier,int(time.time()))).fetchone()
             if not row:
                 raise LookupError('Receipt draft not found or expired.')
+            if expected_version is not None and row['version']!=expected_version:
+                raise ValueError('This preview is outdated. Use the latest receipt confirmation buttons.')
             if row['status']=='cancelled':
                 raise ValueError('This receipt draft was cancelled.')
             key = 'receipt:'+identifier

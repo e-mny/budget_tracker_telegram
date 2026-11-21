@@ -42,7 +42,7 @@ docker volume ls
 docker inspect --format '{{range .Mounts}}{{println .Destination .Name}}{{end}}' DASHBOARD_CONTAINER_ID
 ```
 
-The existing `/data` mount contains the ledger, receipt drafts, sessions, budgets, goals and notification history. Production Compose uses an **external volume** and refuses to silently create a replacement. The updater verifies it matches any existing container in this project.
+The existing `/data` mount contains the ledger, receipt and expense drafts, Telegram edit prompts, sessions, budgets, goals and notification history. Production Compose uses an **external volume** and refuses to silently create a replacement. The updater verifies it matches any existing container in this project.
 
 **For a genuinely new installation only**, create the selected volume once:
 
@@ -130,7 +130,9 @@ For local development or manual deployment, ordinary `compose.yaml` still suppor
 - Group changes not applied: first run `git pull --ff-only` to obtain the group-aware Compose configuration, then recreate the Telegram worker after updating `.env`; GitHub image updates do not set your group ID. Keep privacy mode enabled and use addressed commands. If a group is upgraded to a supergroup, discover and configure its new ID.
 - Telegram polling conflict: stop the other worker using that same token.
 - Notifications missing: check worker logs, notification settings, timezone and internet access. Alerts need a configured budget; renewal reminders use the configured schedule, not bank data.
-- Wrong recurring charge: edit the recorded expense and the subscription's future settings separately.
+- Wrong recorded expense: use `/recent`, then Edit/Delete, or `/edit ID` / `/delete ID`. Each change requires confirmation. A recurring charge can be corrected this way; future subscription settings are still managed separately in the dashboard.
+- Pending expense missing from the dashboard: tap Confirm expense in its latest Telegram preview. Unconfirmed drafts do not count as expenditure.
+- Outdated preview: use the newest buttons, or start `/edit ID` / `/delete ID` again if the recorded expense changed since previewing it.
 - Password/login errors: check the 12-character minimum, HTTPS cookie setting, and reverse-proxy Host/scheme configuration.
 - Receipt OCR error: try a sharp, upright English receipt, or enter the expense manually. Extraction never saves automatically.
 

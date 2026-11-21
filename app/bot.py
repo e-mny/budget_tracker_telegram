@@ -11,6 +11,7 @@ import httpx
 from .core import CATEGORIES, Ledger, ZONE, money, month_bounds, parse_add
 from .graphs import render_summary
 from .receipts import MAX_RECEIPT, extract_receipt
+from .telegram_editor import TelegramEditorMixin
 
 log = logging.getLogger('penny-bot')
 HELP = '''Penny · your expense ledger
@@ -19,6 +20,10 @@ HELP = '''Penny · your expense ledger
 /add 2.20 transport MRT
 /add 45 personal_care Haircut @2026-11-20
 /whoami — show your user, chat and topic IDs
+/recent — browse expenses with Edit/Delete buttons
+/edit ID — edit an expense or pending draft
+/delete ID — review and confirm a deletion
+/cancel DRAFT_ID — discard a pending draft
 /categories — available categories
 /month — spending and budget this month
 /recap — visual monthly summary
@@ -28,7 +33,7 @@ Send a receipt photo — extract fields for review
 /add 25 travel Lunch --original USD 18.50 — travel purchase
 /help — show these commands
 
-Amounts are SGD. Date is optional and uses Asia/Singapore by default. Each /add saves immediately; edit or delete mistakes in the dashboard. Automatic subscriptions are already included; do not log them twice.
+Amounts are SGD. Date is optional and uses Asia/Singapore by default. Every /add shows a preview with Confirm expense, Edit and Cancel. Nothing is recorded until you confirm. Use /recent, /edit or /delete to manage saved expenses here. Automatic subscriptions are already included; do not log them twice.
 
 In groups, use /add@YourBot and /month@YourBot. Reply to one of this bot’s messages with a receipt photo to scan it. Only the configured owner can use the ledger.'''
 
@@ -66,7 +71,7 @@ class TelegramError(Exception):
     pass
 
 
-class Bot:
+class Bot(TelegramEditorMixin):
     def __init__(self, ledger, token, user_id, client=None, group_id=None, notification_chat='auto', notification_thread_id=0):
         if not token or not str(user_id).isdigit() or int(user_id) <= 0:
             raise ValueError('Set TELEGRAM_BOT_TOKEN and TELEGRAM_ALLOWED_USER_ID (positive numeric private user ID).')
@@ -134,13 +139,6 @@ class Bot:
     def replying_to_me(self, message):
         return self.bot_id is not None and message.get('reply_to_message', {}).get('from', {}).get('id') == self.bot_id
 
-    def check_receipt_context(self, draft, message):
-        payload = draft['payload']
-        expected = (payload.get('_telegram_chat_id', self.user_id), payload.get('_telegram_thread_id', 0))
-        actual = (message['chat']['id'], message.get('message_thread_id', 0))
-        if expected != actual:
-            raise ValueError('Open this receipt draft in its original chat and topic.')
-
     def send(self, text, *, chat_id=None, thread_id=0):
         payload = {'chat_id': self.user_id if chat_id is None else chat_id, 'text': text}
         if thread_id:
@@ -161,6 +159,8 @@ class Bot:
         valid = True
         try:
             self.ledger.validate_expense(payload)
+            from .features import currency_fields
+            currency_fields(payload)
         except ValueError:
             valid = False
         lines = [f'Receipt draft {identifier} · {draft["status"]}',
@@ -170,13 +170,14 @@ class Bot:
                  payload.get('warning', 'Review all fields before saving.')]
         if payload.get('original_currency'):
             lines.append(f'Original: {payload["original_currency"]} {payload.get("original_amount") or "Enter original amount"}')
-        lines.append(f'To correct: /receipt {identifier} 12.50 food Merchant @YYYY-MM-DD')
+        lines.append(f'To correct: tap Edit, or use /receipt {identifier} 12.50 food Merchant @YYYY-MM-DD')
         lines.append('For foreign purchases append: --original USD 10.00')
         keyboard = []
         if valid and draft['status'] == 'pending':
-            keyboard.append({'text':'Save receipt','callback_data':'receipt-save:'+identifier})
+            keyboard.append({'text':'Save receipt','callback_data':f'receipt-save:{identifier}:{draft["version"]}'})
         if draft['status'] == 'pending':
-            keyboard.append({'text':'Cancel','callback_data':'receipt-cancel:'+identifier})
+            keyboard.append({'text':'Edit','callback_data':f'entry-edit:{identifier}:{draft["version"]}'})
+            keyboard.append({'text':'Cancel','callback_data':f'receipt-cancel:{identifier}:{draft["version"]}'})
         destination = {'chat_id': self.user_id if chat_id is None else chat_id}
         if thread_id:
             destination['message_thread_id'] = thread_id
@@ -220,24 +221,44 @@ class Bot:
         message = callback.get('message', {})
         if not self.allowed(callback.get('from', {}), message.get('chat', {})):
             return
-        action, _, identifier = callback.get('data', '').partition(':')
-        if action not in ('receipt-save', 'receipt-cancel'):
+        parts = callback.get('data', '').split(':')
+        action = parts[0]
+        if action not in ('receipt-save','receipt-cancel','entry-confirm','entry-edit','entry-cancel',
+                          'expense-edit','expense-delete','expense-page'):
             return
-        self.telegram('answerCallbackQuery', callback_query_id=callback['id'])
         def reply(text):
             return self.send(text, **self.destination(message))
         try:
-            if action == 'receipt-save':
-                draft = self.ledger.draft(identifier, 'receipt')
-                self.check_receipt_context(draft, message)
-                row = self.ledger.confirm_receipt(identifier, draft['payload'])
-                reply(f'Saved receipt #{row["id"]} · {money(row["amount"])}. Edit any mistakes in the dashboard.')
-            elif action == 'receipt-cancel':
-                draft = self.ledger.draft(identifier, 'receipt')
-                self.check_receipt_context(draft, message)
-                self.ledger.cancel_draft(identifier)
-                reply('Receipt draft cancelled.')
-        except (ValueError, LookupError) as error:
+            # An expired acknowledgement must not block durable, idempotent expense actions.
+            try:
+                self.telegram('answerCallbackQuery', callback_query_id=callback['id'])
+            except TelegramError:
+                pass
+            request_key = 'callback:'+callback['id']
+            if action == 'expense-page':
+                if len(parts)!=3 or not parts[2].isdigit():raise ValueError('Invalid expense page.')
+                return self.recent_preview(message,None if parts[1]=='all' else parts[1],int(parts[2]))
+            if action in ('expense-edit','expense-delete'):
+                if len(parts)!=2 or not parts[1].isdigit():raise ValueError('Invalid expense ID.')
+                if action=='expense-edit':return self.edit_command(parts[1],message,request_key)
+                return self.delete_command(parts[1],message,request_key)
+            if len(parts) not in (2,3) or not re.fullmatch(r'[0-9a-f]{24}',parts[1]):
+                raise ValueError('Invalid draft button. Use /recent or create a new expense.')
+            identifier=parts[1]
+            if len(parts)==3 and not parts[2].isdigit():raise ValueError('Invalid preview version.')
+            version=int(parts[2]) if len(parts)==3 else 1
+            if action=='entry-edit':return self.editor_prompt(identifier,message,version)
+            if action in ('receipt-cancel','entry-cancel'):
+                self.ledger.cancel_telegram_draft(identifier,*self.context(message),version)
+                return reply('Draft cancelled. Nothing changed.')
+            if action=='receipt-save':
+                draft=self.ledger.draft(identifier,'receipt')
+                self.ledger.check_telegram_context(draft,*self.context(message))
+                row=self.ledger.confirm_receipt(identifier,draft['payload'],expected_version=version)
+                return self.saved_result(row,already=draft['status']=='saved',**self.destination(message))
+            result=self.ledger.confirm_expense_proposal(identifier,*self.context(message),version)
+            self.saved_result(result['expense'],result['operation'],result['already_confirmed'],**self.destination(message))
+        except (ValueError,LookupError) as error:
             reply(str(error))
 
     def process_update(self, update):
@@ -265,6 +286,8 @@ class Bot:
                 return
         def reply(text):
             return self.send(text, **self.destination(message))
+        if command is None and self.handle_editor_reply(update['update_id'],message):
+            return
         if message.get('photo') or message.get('document'):
             if is_group and not (self.replying_to_me(message) or (command == 'receipt' and not args.strip())):
                 return
@@ -277,7 +300,7 @@ class Bot:
             if not is_group:
                 reply('Use /add 6.50 food Lunch to log an expense, or /help for commands.')
             return
-        if is_group and command not in ('start', 'help', 'categories', 'add', 'receipt', 'month', 'recap') and not addressed:
+        if is_group and command not in ('start', 'help', 'categories', 'add', 'receipt', 'month', 'recap', 'recent', 'edit', 'delete', 'cancel') and not addressed:
             return
         try:
             if command in ('start', 'help'):
@@ -285,30 +308,20 @@ class Bot:
             elif command == 'categories':
                 reply('Categories (use the name before the colon):\n\n' + '\n'.join(f'{key}: {label}' for key, (label, _) in CATEGORIES.items()))
             elif command == 'add':
-                # Telegram timestamps keep an update received after midnight in its original month.
                 local_date = datetime.fromtimestamp(message['date'], ZONE).date() if message.get('date') else None
-                row = self.ledger.add_expense(parse_add(args, as_of=local_date), source='telegram',
-                                               source_key=f"telegram:{self.user_id}:{update['update_id']}")
-                state = self.ledger.summary(row['spent_on'][:7])
-                reply(f"Saved #{row['id']} · {money(row['amount'])} · {CATEGORIES[row['category']][0]}\n"
-                          f"{row['note'] or 'No description'} · {row['spent_on']}\nMonth total: {money(state['total'])}\n"
-                          + (f"Budget remaining: {money(state['remaining'])}" if state['budget'] else 'Set your monthly budget in the dashboard.'))
-            elif command == 'receipt':
-                identifier, separator, corrected = args.strip().partition(' ')
-                if not separator:
-                    raise ValueError('Send a receipt photo, then use /receipt DRAFT_ID 12.50 food Merchant to correct its fields before saving.')
-                draft = self.ledger.draft(identifier, 'receipt')
-                self.check_receipt_context(draft, message)
-                if draft['status'] != 'pending':
-                    raise ValueError('This receipt draft has already been saved or cancelled.')
-                payload = parse_add(corrected)
-                self.ledger.validate_expense(payload)
-                revised = {**draft['payload'], **payload,
-                           'original_currency': payload.get('original_currency'), 'original_amount': payload.get('original_amount')}
-                import json
-                with self.ledger.db() as db:
-                    db.execute("UPDATE drafts SET payload=? WHERE id=? AND status='pending'",(json.dumps(revised), identifier))
-                self.receipt_preview(identifier, **self.destination(message))
+                payload=parse_add(args,as_of=local_date)
+                identifier=self.ledger.propose_expense('add',payload,*self.context(message),update['update_id'])
+                self.proposal_preview(identifier,**self.destination(message))
+            elif command in ('edit','receipt'):
+                self.edit_command(args,message,update['update_id'])
+            elif command == 'delete':
+                self.delete_command(args,message,update['update_id'])
+            elif command == 'recent':
+                self.recent_preview(message,args.strip() or None)
+            elif command == 'cancel':
+                draft=self.ledger.draft(args.strip())
+                self.ledger.cancel_telegram_draft(draft['id'],*self.context(message),draft['version'])
+                reply('Draft cancelled. Nothing changed.')
             elif command == 'month':
                 reply(summary_text(self.ledger.summary()))
             elif command == 'recap':
@@ -346,7 +359,8 @@ class Bot:
                     identity = self.telegram('getMe')
                     self.username, self.bot_id = identity['username'], identity['id']
                     self.telegram('setMyCommands', commands=[{'command': c, 'description': d} for c, d in [
-                        ('add', 'Log an expense: /add 6.50 food Lunch'), ('month', 'Current month spending and budget'),
+                        ('add', 'Preview an expense: /add 6.50 food Lunch'), ('recent', 'Browse expenses with Edit and Delete buttons'),
+                        ('edit', 'Edit an expense: /edit ID'), ('delete', 'Preview deletion: /delete ID'), ('cancel', 'Cancel a pending draft'), ('month', 'Current month spending and budget'),
                         ('recap', 'Visual monthly summary'), ('receipt', 'Correct a receipt draft before saving'), ('categories', 'Available expense categories'), ('help', 'How to use Penny'), ('whoami', 'Show user, chat, and topic IDs')]])
                 updates = self.telegram('getUpdates', offset=int(self.ledger.get_state('offset', '0')),
                                         timeout=20, allowed_updates=['message', 'callback_query'])

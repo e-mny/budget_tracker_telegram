@@ -208,7 +208,8 @@ def test_bot_receipt_callback_allowlist_and_dedup(ledger,monkeypatch):
     payload=parse_receipt('CAFE\nTOTAL SGD 5.00')
     identifier=ledger.new_draft('receipt',payload)
     bot=Bot(ledger,'test-token',123)
-    sent=[];monkeypatch.setattr(bot,'send',sent.append);monkeypatch.setattr(bot,'telegram',lambda *a,**k: {})
+    sent=[];monkeypatch.setattr(bot,'send',sent.append)
+    monkeypatch.setattr(bot,'telegram',lambda method,**payload: (sent.append(payload['text']) if method=='sendMessage' else None) or {'message_id':1})
     callback={'id':'callback1','from':{'id':999},'message':{'chat':{'id':123,'type':'private'}},'data':'receipt-save:'+identifier}
     bot.process_update({'callback_query':callback})
     assert ledger.summary()['total']==12410
