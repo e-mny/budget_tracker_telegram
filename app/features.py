@@ -122,7 +122,11 @@ class FeatureMixin:
         if not isinstance(name,str) or not 1 <= len(name.strip()) <= 100:
             raise ValueError('Goal name must be between 1 and 100 characters.')
         target = cents(payload.get('target'))
-        saved = 0 if str(payload.get('saved','0')) in ('0','0.00','') else cents(payload.get('saved'))
+        raw_saved = payload.get('saved', '0')
+        try:
+            saved = 0 if Decimal(str(raw_saved)) == 0 else cents(raw_saved)
+        except InvalidOperation:
+            raise ValueError('Enter a valid already-saved amount, including zero.') from None
         due = payload.get('target_date') or None
         if due:
             try:

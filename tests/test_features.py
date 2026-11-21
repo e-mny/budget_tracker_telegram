@@ -101,11 +101,11 @@ def test_settings_validation(ledger):
 
 
 def test_goals_and_atomic_idempotent_contributions(ledger):
-    identifier=ledger.save_goal(None,{'name':'Holiday','target':'2000','saved':'100','target_date':'2027-03-01'})
+    identifier=ledger.save_goal(None,{'name':'Holiday','target':'2000','saved':'0.0','target_date':'2027-03-01'})
     with ThreadPoolExecutor(max_workers=3) as pool:
         list(pool.map(lambda _: ledger.contribute_goal(identifier,'25','request-key-123'),range(3)))
     goal=ledger.summary()['goals'][0]
-    assert goal['saved']==12500 and goal['target']==200000
+    assert goal['saved']==2500 and goal['target']==200000
     assert ledger.summary()['total']==12410
     with pytest.raises(ValueError):ledger.contribute_goal(identifier,'30','request-key-123')
     ledger.delete_goal(identifier)
