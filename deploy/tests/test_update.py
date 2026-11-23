@@ -2,6 +2,7 @@
 import json
 import fcntl
 import os
+import shutil
 from pathlib import Path
 import subprocess
 import tempfile
@@ -51,6 +52,7 @@ else:
 '''
 
 
+@unittest.skipUnless(shutil.which('flock'), 'Updater tests require the Linux flock command.')
 class UpdaterTests(unittest.TestCase):
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()

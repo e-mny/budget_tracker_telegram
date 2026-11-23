@@ -5,6 +5,7 @@ const escapeHTML = value => String(value).replace(/[&<>"']/g, char => ({'&':'&am
 const monthLabel = month => new Date(month + '-01T12:00:00').toLocaleDateString('en-SG', {month:'long',year:'numeric'});
 const dateLabel = date => new Date(date + 'T12:00:00').toLocaleDateString('en-SG', {day:'2-digit',month:'short'});
 let receiptDraft=null, csvDraft=null, editingGoal=null, contributingGoal=null, contributionKey=null;
+let editingIncome=null;
 let data, chartMode = 'daily', editingExpense = null, editingSubscription = null, refreshSequence = 0, toastTimer;
 
 async function api(path, method='GET', body) {
@@ -80,7 +81,7 @@ function render() {
   $('filter-category').value = previousFilter;
   $('expense-category').innerHTML = options;
   $('data-note').textContent = `SGD · ${data.timezone} · Recorded expenses only`;
-  renderCategories(); renderTrend(); renderBudget(); renderSubscriptions(); renderTransactions(); renderFeatures();
+  renderCashflow(); renderCategories(); renderTrend(); renderBudget(); renderSubscriptions(); renderTransactions(); renderFeatures();
 }
 function renderCategories() {
   const categories = data.categories.filter(cat => cat.amount > 0).sort((a,b) => b.amount - a.amount);
@@ -152,7 +153,7 @@ function billingLabel(sub) {
 function renderSubscriptions() {
   $('subscription-list').innerHTML = data.subscriptions.map(sub => {
     const due = data.upcoming_subscriptions.find(item=>item.id===sub.id)?.next_due;
-    const label = sub.payment_type === 'investment' ? 'Investment' : data.categories.find(cat=>cat.id===sub.category)?.label;
+    const label = sub.payment_type === 'income' ? 'Income' : sub.payment_type === 'investment' ? 'Investment' : data.categories.find(cat=>cat.id===sub.category)?.label;
     return `<button class="subscription-row ${sub.active?'':'inactive'}" data-subscription="${sub.id}" aria-label="Edit recurring payment ${escapeHTML(sub.name)}"><span class="sub-icon">${escapeHTML(sub.name.slice(0,1).toUpperCase())}</span><span class="sub-copy"><strong>${escapeHTML(sub.name)}</strong><small>${escapeHTML(label)} · ${sub.active ? escapeHTML(billingLabel(sub)) + (due?' · Next '+dateLabel(due):'') : 'Paused'}</small></span><span class="sub-amount">${cash(sub.amount)}</span></button>`;
   }).join('');
   $('subscription-total').textContent = cash(data.subscription_total) + ' / month';
@@ -161,13 +162,13 @@ function renderSubscriptions() {
 }
 function renderTransactions() {
   if (!data) return;
-  const query=$('search').value.trim().toLowerCase(), filter=$('filter-category').value;
-  const rows=data.expenses.filter(row => (!filter || row.category===filter) && (!query || `${row.note} ${row.category} ${row.spent_on} ${data.categories.find(c=>c.id===row.category).label}`.toLowerCase().includes(query)));
+  const query=$('search').value.trim().toLowerCase(), filter=$('filter-category').value, spendingPriority=$('filter-priority').value;
+  const rows=data.expenses.filter(row => (!spendingPriority || row.necessity===spendingPriority) && (!filter || row.category===filter) && (!query || `${row.note} ${row.category} ${row.spent_on} ${data.categories.find(c=>c.id===row.category).label}`.toLowerCase().includes(query)));
   $('transaction-count').textContent = `${rows.length} of ${data.count} expense${data.count===1?'':'s'} · ${monthLabel(data.month)}`;
   $('transaction-rows').innerHTML = rows.map(row => {
     const cat=data.categories.find(c=>c.id===row.category);
     const source=({'telegram':'Telegram','subscription':'Auto-recorded','dashboard':'Dashboard','csv':'CSV import','receipt':'Receipt'})[row.source] || 'Dashboard';
-    return `<tr><td>${dateLabel(row.spent_on)}</td><td title="${escapeHTML(row.note)}">${escapeHTML(row.note || cat.label)}</td><td><span class="category-pill" style="--pill-bg:${cat.color}16;--pill-color:${cat.color}"><i class="legend-dot" style="background:${cat.color}"></i>${escapeHTML(cat.label)}</span></td><td><span class="source-tag">${source}</span></td><td class="amount-cell">${cash(row.amount)}${row.original_currency?`<span class="original-value">${escapeHTML(row.original_currency)} ${escapeHTML(row.original_amount)}</span>`:""}</td><td><button class="edit-expense" data-expense="${row.id}" aria-label="Edit ${escapeHTML(row.note || cat.label)}">✎</button></td></tr>`;
+    return `<tr><td>${dateLabel(row.spent_on)}</td><td title="${escapeHTML(row.note)}">${escapeHTML(row.note || cat.label)}</td><td><span class="category-pill" style="--pill-bg:${cat.color}16;--pill-color:${cat.color}"><i class="legend-dot" style="background:${cat.color}"></i>${escapeHTML(cat.label)}</span><small class="priority-label">${({necessity:'Necessity',non_necessity:'Non-necessity',unclassified:'Unclassified'})[row.necessity]}</small></td><td><span class="source-tag">${source}</span></td><td class="amount-cell">${cash(row.amount)}${row.original_currency?`<span class="original-value">${escapeHTML(row.original_currency)} ${escapeHTML(row.original_amount)}</span>`:""}</td><td><button class="edit-expense" data-expense="${row.id}" aria-label="Edit ${escapeHTML(row.note || cat.label)}">✎</button></td></tr>`;
   }).join('');
   $('table-empty').hidden = rows.length>0;
   $('table-empty').textContent = data.count ? 'No expenses match your filters.' : 'Nothing recorded yet. Add your first expense here or send /add on Telegram.';
@@ -185,6 +186,7 @@ function openExpense(identifier=null) {
   $('expense-category').value = row?.category || 'food';
   $('expense-date').value = row?.spent_on || data.today;
   $('expense-note').value = row?.note || '';
+  $('expense-necessity').value=row?.necessity || '';
   $('expense-currency').innerHTML = '<option value="">None · SGD only</option>' + data.currencies.map(code=>`<option value="${code}">${code}</option>`).join('');
   $('expense-currency').value=row?.original_currency || '';
   $('expense-original').value=row?.original_amount || '';
@@ -210,6 +212,7 @@ function openSubscription(identifier=null) {
   $('subscription-category').innerHTML=data.categories.map(cat=>`<option value="${cat.id}">${escapeHTML(cat.label)}</option>`).join('');
   $('subscription-category').value=sub?.category || 'home';
   $('subscription-type').value=sub?.payment_type || 'expense';
+  $('subscription-necessity').value=sub?.necessity || '';
   $('subscription-type').disabled=Boolean(sub);
   updatePaymentType();
   $('subscription-interval').value=sub?.interval_count || 1;
@@ -220,7 +223,7 @@ function openSubscription(identifier=null) {
   $('subscription-dialog').showModal();
 }
 function updatePaymentType() {
-  const investment = $('subscription-type').value === 'investment';
+  const investment = $('subscription-type').value !== 'expense';
   $('subscription-category-field').hidden=investment;
   $('subscription-category').disabled=investment;
 }
@@ -246,6 +249,7 @@ $('edit-budget').addEventListener('click',openBudget);
 $('new-subscription').addEventListener('click',()=>openSubscription());
 $('search').addEventListener('input',renderTransactions);
 $('filter-category').addEventListener('change',renderTransactions);
+$('filter-priority').addEventListener('change',renderTransactions);
 document.querySelectorAll('[data-chart]').forEach(button=>button.addEventListener('click',()=>{
   chartMode=button.dataset.chart;
   document.querySelectorAll('[data-chart]').forEach(b=>{b.classList.toggle('selected',b===button);b.setAttribute('aria-pressed',String(b===button));});
@@ -256,7 +260,7 @@ document.querySelectorAll('[data-nav]').forEach(link=>link.addEventListener('cli
   document.querySelectorAll('[data-nav]').forEach(l=>l.classList.toggle('active',l===link));
 }));
 $('expense-form').addEventListener('submit',event=>saveForm(event,'expense-error',async()=>{
-  const payload={amount:$('expense-amount').value,category:$('expense-category').value,spent_on:$('expense-date').value,note:$('expense-note').value,original_currency:$('expense-currency').value || null,original_amount:$('expense-currency').value ? $('expense-original').value : null};
+  const payload={necessity:$('expense-necessity').value || null,amount:$('expense-amount').value,category:$('expense-category').value,spent_on:$('expense-date').value,note:$('expense-note').value,original_currency:$('expense-currency').value || null,original_amount:$('expense-currency').value ? $('expense-original').value : null};
   await api(receiptDraft?'/receipts/'+receiptDraft+'/confirm':editingExpense?'/expenses/'+editingExpense:'/expenses',editingExpense?'PUT':'POST',payload);
   receiptDraft=null;
   $('expense-dialog').close();
@@ -268,7 +272,7 @@ $('budget-form').addEventListener('submit',event=>saveForm(event,'budget-error',
   $('budget-dialog').close();await refresh();toast('Monthly budget saved');
 }));
 $('subscription-form').addEventListener('submit',event=>saveForm(event,'subscription-error',async()=>{
-  const payload={name:$('subscription-name').value,amount:$('subscription-amount').value,payment_type:$('subscription-type').value,category:$('subscription-type').value==='investment'?'other':$('subscription-category').value,interval_count:Number($('subscription-interval').value),interval_unit:$('subscription-unit').value,start_date:$('subscription-start').value,active:$('subscription-active').checked};
+  const payload={necessity:$('subscription-necessity').value || null,name:$('subscription-name').value,amount:$('subscription-amount').value,payment_type:$('subscription-type').value,category:$('subscription-type').value!=='expense'?'other':$('subscription-category').value,interval_count:Number($('subscription-interval').value),interval_unit:$('subscription-unit').value,start_date:$('subscription-start').value,active:$('subscription-active').checked};
   await api(editingSubscription?'/subscriptions/'+editingSubscription:'/subscriptions',editingSubscription?'PUT':'POST',payload);
   $('subscription-dialog').close();await refresh();toast('Recurring payment saved');
 }));
@@ -430,3 +434,35 @@ async function downloadCSV(all=false) {
 }
 $('export-month').addEventListener('click',()=>downloadCSV());$('export-all').addEventListener('click',()=>downloadCSV(true));
 refresh();
+
+function renderCashflow() {
+  const priorities=data.spending_priorities;
+  const labels={necessity:'Necessities',non_necessity:'Non-necessities',unclassified:'Unclassified spending'};
+  const items=[['Income received',data.income_total],...Object.entries(priorities).map(([k,v])=>[labels[k],v]),['Investments',data.investment_total],['Net cash flow',data.net_cashflow]];
+  $('cashflow-body').innerHTML=`<div class="cashflow-grid">${items.map(([label,value])=>`<div><span>${label}</span><strong class="${value<0?'negative':''}">${cash(value)}</strong></div>`).join('')}</div><div class="priority-bar" aria-label="Spending priorities">${Object.entries(priorities).map(([key,value])=>`<span class="${key}" style="width:${data.total?value/data.total*100:0}%" title="${labels[key]}: ${cash(value)}"></span>`).join('')}</div><p class="form-hint">Net cash flow = recorded income − spending − investments. This is not your bank balance. ${data.income_entries.length?'':'Add income to complete the picture. '}Gym, insurance, phone bills, and household contributions default to necessities. You can change each expense or recurring payment; other spending stays unclassified until you choose.</p>`;
+  $('income-list').innerHTML=`<h3>Income sources</h3>${data.income_sources.map(source=>`<div class="investment-row"><span>${escapeHTML(source.name)}</span><strong>${cash(source.amount)}</strong></div>`).join('') || '<p class="empty-inline">No income recorded for this month.</p>'}${data.income_entries.map(row=>`<button class="subscription-row" data-income="${row.id}"><span class="sub-copy"><strong>${escapeHTML(row.source)}</strong><small>${dateLabel(row.received_on)} · ${escapeHTML(row.note)}</small></span><span class="sub-amount">${cash(row.amount)} · Edit</span></button>`).join('')}`;
+  document.querySelectorAll('[data-income]').forEach(button=>button.addEventListener('click',()=>openIncome(Number(button.dataset.income))));
+}
+function openIncome(identifier=null) {
+  editingIncome=identifier;
+  const row=data.income_entries.find(item=>item.id===identifier);
+  $('income-title').textContent=row?'Edit income':'Add income';
+  $('income-source').value=row?.source || '';
+  $('income-amount').value=row?(row.amount/100).toFixed(2):'';
+  $('income-date').value=row?.received_on || data.today;
+  $('income-date').max=data.today;
+  $('income-note').value=row?.note || '';
+  $('delete-income').hidden=!row;
+  $('income-error').textContent='';
+  $('income-dialog').showModal();
+}
+$('add-income').addEventListener('click',()=>openIncome());
+$('income-form').addEventListener('submit',event=>saveForm(event,'income-error',async()=>{
+  await api(editingIncome?'/income/'+editingIncome:'/income',editingIncome?'PUT':'POST',{source:$('income-source').value,amount:$('income-amount').value,received_on:$('income-date').value,note:$('income-note').value});
+  $('income-dialog').close();await refresh();toast('Income saved');
+}));
+$('delete-income').addEventListener('click',async()=>{
+  if(!confirm('Delete this recorded income? It will be removed from cash flow totals.')) return;
+  try {await api('/income/'+editingIncome,'DELETE');$('income-dialog').close();await refresh();toast('Income deleted');}
+  catch(error){$('income-error').textContent=error.message;}
+});

@@ -40,6 +40,8 @@ In groups, use /add@YourBot and /month@YourBot. Reply to one of this bot’s mes
 
 def summary_text(summary):
     lines = [f"Penny · {summary['month']}", f"Total spent: {money(summary['total'])} · {summary['count']} expenses"]
+    if 'income_total' in summary:
+        lines.append(f"Income: {money(summary['income_total'])} · Net cash flow: {money(summary['net_cashflow'])}")
     if summary['budget'] is not None:
         lines.append(f"Budget: {money(summary['budget'])}")
         lines.append(f"{'Remaining' if summary['remaining'] >= 0 else 'Over budget'}: {money(abs(summary['remaining']))}")

@@ -7,6 +7,7 @@ import time
 from datetime import date, timedelta
 from decimal import Decimal, InvalidOperation
 from .recurrence import annual_cost, next_due
+from .cashflow import priority
 
 CURRENCY_DIGITS = dict.fromkeys('SGD USD EUR GBP MYR THB IDR AUD NZD CNY HKD TWD PHP INR CHF CAD AED'.split(), 2)
 CURRENCY_DIGITS.update(dict.fromkeys('JPY KRW VND'.split(), 0))
@@ -208,7 +209,7 @@ class FeatureMixin:
                     continue
                 key = f"renewal:{sub['id']}:{due}"
                 if key not in sent:
-                    title = 'investment contribution' if sub['payment_type'] == 'investment' else 'subscription renewal'
+                    title = {'investment': 'investment contribution', 'income': 'income payment'}.get(sub['payment_type'], 'subscription renewal')
                     result.append({'keys':[key], 'text':f"Penny · {title}\n{sub['name']} · {money(sub['amount'])}\nDue {due}. Check your configured billing schedule in the dashboard."})
         return result
 
@@ -266,7 +267,7 @@ class FeatureMixin:
                 return dict(old)
             values = self.validate_expense(payload)
             currency = currency_fields(payload)
-            cursor = db.execute('''INSERT INTO expenses(amount,category,note,spent_on,source,source_key,original_currency,original_amount)
-                                 VALUES (?,?,?,?,'receipt',?,?,?)''',(*values,key,*currency))
+            cursor = db.execute('''INSERT INTO expenses(amount,category,note,spent_on,source,source_key,original_currency,original_amount,necessity)
+                                 VALUES (?,?,?,?,'receipt',?,?,?,?)''',(*values,key,*currency,priority(payload)))
             db.execute("UPDATE drafts SET status='saved' WHERE id=?",(identifier,))
             return dict(db.execute('SELECT * FROM expenses WHERE id=?',(cursor.lastrowid,)).fetchone())

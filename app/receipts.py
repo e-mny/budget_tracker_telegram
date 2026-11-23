@@ -9,7 +9,7 @@ from pathlib import Path
 
 from PIL import Image, ImageOps, UnidentifiedImageError
 
-from .core import today
+from . import core
 
 MAX_RECEIPT = 10 * 1024 * 1024
 MAX_PIXELS = 25_000_000
@@ -37,14 +37,14 @@ def parse_receipt(text):
                 values=re.findall(r'\d[\d,]*',line)
                 if values:
                     amount=values[-1].replace(',','')
-    spent_on=today().isoformat()
+    spent_on=core.today().isoformat()
     found=False
     for pattern,order in [(r'\b(20\d{2})[-/](\d{1,2})[-/](\d{1,2})\b','ymd'),(r'\b(\d{1,2})[-/](\d{1,2})[-/](20\d{2})\b','dmy')]:
         for match in re.finditer(pattern,text):
             a,b,c=map(int,match.groups())
             try:
                 candidate=date(a,b,c) if order=='ymd' else date(c,b,a)
-                if candidate<=today():
+                if candidate<=core.today():
                     spent_on=candidate.isoformat(); found=True; break
             except ValueError:
                 continue

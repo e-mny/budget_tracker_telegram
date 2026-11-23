@@ -164,6 +164,16 @@ def test_csv_invalid_row_saves_nothing_and_cancel(ledger):
     with pytest.raises(ValueError):confirm_csv(ledger,preview['id'])
 
 
+def test_receipt_dates_follow_the_ledger_clock(ledger, monkeypatch):
+    monkeypatch.setattr(core, 'today', lambda: date(2020, 1, 2))
+    payload = parse_receipt('CAFE\n03/01/2020\nTOTAL SGD 5.00')
+    assert payload['spent_on'] == '2020-01-02'
+    ledger.validate_expense(payload)
+    monkeypatch.setattr(core, 'today', lambda: date(2020, 1, 3))
+    assert parse_receipt('CAFE\nTOTAL SGD 5.00')['spent_on'] == '2020-01-03'
+    assert parse_receipt('CAFE\n03/01/2020\nTOTAL SGD 5.00')['spent_on'] == '2020-01-03'
+
+
 def test_receipt_parse_and_explicit_confirmation(ledger):
     payload=parse_receipt('Noodle Cafe\n21/11/2026\nSubtotal 10.00\nGST 0.90\nTOTAL SGD 10.90\nCash 20.00\nChange 9.10')
     assert payload['amount']=='10.90' and payload['category']=='food' and payload['note']=='Noodle Cafe'

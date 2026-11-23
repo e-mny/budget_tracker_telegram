@@ -115,6 +115,20 @@ def create_app(ledger=None):
     def add_expense(payload: dict):
         return store.add_expense(payload)
 
+    @api.post('/income', status_code=201)
+    def add_income(payload: dict):
+        return {'id': store.save_income(None, payload)}
+
+    @api.put('/income/{identifier}')
+    def edit_income(identifier: int, payload: dict):
+        store.save_income(identifier, payload)
+        return {'ok': True}
+
+    @api.delete('/income/{identifier}')
+    def delete_income(identifier: int):
+        store.delete_income(identifier)
+        return {'ok': True}
+
     @api.put('/expenses/{identifier}')
     def update_expense(identifier: int, payload: dict):
         store.update_expense(identifier, payload)

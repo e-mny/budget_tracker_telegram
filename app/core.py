@@ -14,6 +14,7 @@ from .telegram_ledger import TelegramLedgerMixin
 from .recurrence import annual_cost, due_dates, start_date
 from .categories import CATEGORIES, ALIASES, migrate_categories
 from .contributions import initialize_contributions
+from .cashflow import CashflowMixin, priority, resolved_priority
 
 ZONE = ZoneInfo(os.getenv('TZ', 'Asia/Singapore'))
 
@@ -58,7 +59,7 @@ def money(value):
     return f'S${value / 100:,.2f}'
 
 
-class Ledger(FeatureMixin, TelegramLedgerMixin):
+class Ledger(CashflowMixin, FeatureMixin, TelegramLedgerMixin):
     def __init__(self, path=None):
         self.path = Path(path or Path(os.getenv('DATA_DIR', 'data')) / 'ledger.sqlite3')
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -119,6 +120,7 @@ class Ledger(FeatureMixin, TelegramLedgerMixin):
                 db.execute("UPDATE subscriptions SET category='subscription'")
             migrate_categories(db)
             initialize_contributions(db, today())
+            self.initialize_cashflow(db)
 
     def sync_subscriptions(self, as_of=None):
         as_of = as_of or today()
@@ -130,6 +132,11 @@ class Ledger(FeatureMixin, TelegramLedgerMixin):
         for sub in db.execute('SELECT * FROM subscriptions WHERE active=1').fetchall():
             for due in due_dates(sub, start_date(sub), as_of):
                 period = due.isoformat() if sub['interval_unit'] in ('days', 'weeks') else due.strftime('%Y-%m')
+                if sub['payment_type'] == 'income':
+                    db.execute('''INSERT OR IGNORE INTO income_entries(source,amount,received_on,source_key)
+                        SELECT ?,?,?,? WHERE NOT EXISTS (SELECT 1 FROM income_entries WHERE source_key LIKE ? AND received_on=?)''',
+                        (sub['name'], sub['amount'], due.isoformat(), f"income:{sub['id']}:{period}", f"income:{sub['id']}:%", due.isoformat()))
+                    continue
                 if sub['payment_type'] == 'investment':
                     db.execute('''INSERT OR IGNORE INTO investment_contributions(amount,note,invested_on,source_key)
                         SELECT ?,?,?,? WHERE NOT EXISTS
@@ -138,13 +145,14 @@ class Ledger(FeatureMixin, TelegramLedgerMixin):
                          f"investment:{sub['id']}:%", due.isoformat()))
                     continue
                 # Preserve existing monthly keys, including deleted and edited entries.
-                db.execute('''INSERT OR IGNORE INTO expenses(amount,category,note,spent_on,source,source_key)
-                    SELECT ?,?,?,?,'subscription',? WHERE NOT EXISTS
+                db.execute('''INSERT OR IGNORE INTO expenses(amount,category,note,spent_on,source,source_key,necessity)
+                    SELECT ?,?,?,?,'subscription',?,? WHERE NOT EXISTS
                     (SELECT 1 FROM expenses WHERE source_key LIKE ? AND spent_on=?)''',
-                    (sub['amount'], sub['category'], sub['name'], due.isoformat(), f"subscription:{sub['id']}:{period}",
+                    (sub['amount'], sub['category'], sub['name'], due.isoformat(), f"subscription:{sub['id']}:{period}", resolved_priority(dict(sub)),
                      f"subscription:{sub['id']}:%", due.isoformat()))
 
     def validate_expense(self, payload):
+        priority(payload)
         amount = cents(payload.get('amount'))
         cat = category(payload.get('category'))
         note = payload.get('note', '')
@@ -161,9 +169,10 @@ class Ledger(FeatureMixin, TelegramLedgerMixin):
     def add_expense(self, payload, source='dashboard', source_key=None):
         values = self.validate_expense(payload)
         currency = currency_fields(payload)
+        necessity = priority(payload)
         with self.db() as db:
-            db.execute('''INSERT OR IGNORE INTO expenses(amount,category,note,spent_on,source,source_key,original_currency,original_amount)
-                       VALUES (?,?,?,?,?,?,?,?)''', (*values, source, source_key, *currency))
+            db.execute('''INSERT OR IGNORE INTO expenses(amount,category,note,spent_on,source,source_key,original_currency,original_amount,necessity)
+                       VALUES (?,?,?,?,?,?,?,?,?)''', (*values, source, source_key, *currency, necessity))
             if source_key:
                 return dict(db.execute('SELECT * FROM expenses WHERE source_key=?', (source_key,)).fetchone())
             return dict(db.execute('SELECT * FROM expenses WHERE id=last_insert_rowid()').fetchone())
@@ -171,8 +180,9 @@ class Ledger(FeatureMixin, TelegramLedgerMixin):
     def update_expense(self, identifier, payload):
         values = self.validate_expense(payload)
         currency = currency_fields(payload)
+        necessity = priority(payload)
         with self.db() as db:
-            result = db.execute('UPDATE expenses SET amount=?,category=?,note=?,spent_on=?,original_currency=?,original_amount=? WHERE id=? AND deleted=0', (*values, *currency, identifier))
+            result = db.execute('UPDATE expenses SET amount=?,category=?,note=?,spent_on=?,original_currency=?,original_amount=?,necessity=CASE WHEN ? THEN ? ELSE necessity END WHERE id=? AND deleted=0', (*values, *currency, 'necessity' in payload, necessity, identifier))
             if not result.rowcount:
                 raise LookupError('Expense not found.')
 
@@ -211,10 +221,11 @@ class Ledger(FeatureMixin, TelegramLedgerMixin):
                 raise LookupError('Subscription not found.')
             cat = category(payload.get('category', old['category'] if old else 'home'))
             kind = payload.get('payment_type', old['payment_type'] if old else 'expense')
-            if kind not in ('expense', 'investment'):
-                raise ValueError('Payment type must be expense or investment.')
+            if kind not in ('expense', 'investment', 'income'):
+                raise ValueError('Payment type must be expense, investment, or income.')
+            necessity = priority(payload)
             if old and kind != old['payment_type']:
-                raise ValueError('Create a new recurring payment to change between expenses and investments.')
+                raise ValueError('Create a new recurring payment to change its payment type.')
             count = payload.get('interval_count', old['interval_count'] if old else 1)
             unit = payload.get('interval_unit', old['interval_unit'] if old else 'months')
             if type(count) is not int or not 1 <= count <= 120:
@@ -239,12 +250,12 @@ class Ledger(FeatureMixin, TelegramLedgerMixin):
             self._sync_subscriptions(db, today())
             if identifier is None:
                 db.execute('''INSERT INTO subscriptions(name,amount,billing_day,active,start_month,
-                           interval_count,interval_unit,start_date,schedule_effective_from,category,payment_type) VALUES (?,?,?,?,?,?,?,?,?,?,?)''',
-                           (name.strip(), amount, day, int(active), anchor[:7], count, unit, anchor, effective, cat, kind))
+                           interval_count,interval_unit,start_date,schedule_effective_from,category,payment_type,necessity) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)''',
+                           (name.strip(), amount, day, int(active), anchor[:7], count, unit, anchor, effective, cat, kind, necessity))
             else:
                 db.execute('''UPDATE subscriptions SET name=?,amount=?,billing_day=?,active=?,interval_count=?,
-                           interval_unit=?,start_date=?,schedule_effective_from=?,category=? WHERE id=?''',
-                           (name.strip(), amount, day, int(active), count, unit, anchor, effective, cat, identifier))
+                           interval_unit=?,start_date=?,schedule_effective_from=?,category=?,necessity=CASE WHEN ? THEN ? ELSE necessity END WHERE id=?''',
+                           (name.strip(), amount, day, int(active), count, unit, anchor, effective, cat, 'necessity' in payload, necessity, identifier))
             self._sync_subscriptions(db, today())
 
     def summary(self, month=None):
@@ -262,10 +273,12 @@ class Ledger(FeatureMixin, TelegramLedgerMixin):
             subs = [dict(r) for r in db.execute('SELECT * FROM subscriptions ORDER BY id')]
             for sub in subs:
                 sub['start_date'] = start_date(sub).isoformat()
+                sub['necessity'] = resolved_priority(sub)
             start_month = db.execute("SELECT value FROM meta WHERE key='start_month'").fetchone()['value']
         totals = {key: 0 for key in CATEGORIES}
         daily = {day: 0 for day in range(1, last.day + 1)}
         for row in rows:
+            row['necessity'] = resolved_priority(row)
             totals[row['category']] += row['amount']
             daily[int(row['spent_on'][-2:])] += row['amount']
         total = sum(totals.values())
@@ -281,6 +294,7 @@ class Ledger(FeatureMixin, TelegramLedgerMixin):
                 'subscription_total': round(sum(annual_cost(s) for s in subs if s['active'] and s['payment_type'] == 'expense') / 12),
                 'investment_total': sum(r['amount'] for r in investments), 'investment_contributions': investments,
                 'monthly_investment_commitment': round(sum(annual_cost(s) for s in subs if s['active'] and s['payment_type'] == 'investment') / 12),
+                **self.cashflow_summary(first, last, rows, sum(r['amount'] for r in investments)),
                 **self.feature_summary(month)}
 
     def get_state(self, key, default=None):
