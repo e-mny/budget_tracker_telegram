@@ -53,3 +53,22 @@ def annual_cost(sub):
     periods = {'days': Fraction(365), 'weeks': Fraction(365, 7),
                'months': Fraction(12), 'years': Fraction(1)}
     return sub['amount'] * periods[sub['interval_unit']] / sub['interval_count']
+
+
+def monthly_breakdown(subscriptions, categories):
+    """Allocate cent rounding once so plans, categories and the total agree."""
+    plans = [dict(s) for s in subscriptions if s['active'] and s['payment_type'] == 'expense']
+    amounts = [annual_cost(s) / 12 for s in plans]
+    rounded = [value.numerator // value.denominator for value in amounts]
+    total = round(sum(amounts))
+    remainder = total - sum(rounded)
+    order = sorted(range(len(plans)), key=lambda i: (-(amounts[i] - rounded[i]), plans[i]['id']))
+    for index in order[:remainder]:
+        rounded[index] += 1
+    rows = {key: {'id': key, 'label': label, 'color': color, 'monthly_amount': 0, 'plans': []}
+            for key, (label, color) in categories.items()}
+    for plan, amount in zip(plans, rounded):
+        plan['monthly_amount'] = amount
+        rows[plan['category']]['monthly_amount'] += amount
+        rows[plan['category']]['plans'].append(plan)
+    return list(rows.values()), total

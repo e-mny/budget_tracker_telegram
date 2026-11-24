@@ -11,7 +11,7 @@ from zoneinfo import ZoneInfo
 
 from .features import FeatureMixin, currency_fields
 from .telegram_ledger import TelegramLedgerMixin
-from .recurrence import annual_cost, due_dates, start_date
+from .recurrence import annual_cost, due_dates, start_date, monthly_breakdown
 from .categories import CATEGORIES, ALIASES, migrate_categories
 from .contributions import initialize_contributions
 from .cashflow import CashflowMixin, priority, resolved_priority
@@ -282,6 +282,7 @@ class Ledger(CashflowMixin, FeatureMixin, TelegramLedgerMixin):
             totals[row['category']] += row['amount']
             daily[int(row['spent_on'][-2:])] += row['amount']
         total = sum(totals.values())
+        recurring_categories, recurring_total = monthly_breakdown(subs, CATEGORIES)
         elapsed = min(today(), last).day
         return {'month': month, 'today': today().isoformat(), 'timezone': str(ZONE), 'currency': 'SGD',
                 'total': total, 'count': len(rows), 'budget': budget['amount'] if budget else None,
@@ -291,7 +292,7 @@ class Ledger(CashflowMixin, FeatureMixin, TelegramLedgerMixin):
                 'categories': [{'id': key, 'label': label, 'color': color, 'amount': totals[key]} for key, (label, color) in CATEGORIES.items()],
                 'daily': [{'day': day, 'amount': value} for day, value in daily.items()],
                 'expenses': rows, 'subscriptions': subs, 'start_month': start_month,
-                'subscription_total': round(sum(annual_cost(s) for s in subs if s['active'] and s['payment_type'] == 'expense') / 12),
+                'subscription_total': recurring_total, 'recurring_category_breakdown': recurring_categories,
                 'investment_total': sum(r['amount'] for r in investments), 'investment_contributions': investments,
                 'monthly_investment_commitment': round(sum(annual_cost(s) for s in subs if s['active'] and s['payment_type'] == 'investment') / 12),
                 **self.cashflow_summary(first, last, rows, sum(r['amount'] for r in investments)),

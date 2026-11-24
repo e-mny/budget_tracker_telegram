@@ -81,7 +81,7 @@ function render() {
   $('filter-category').value = previousFilter;
   $('expense-category').innerHTML = options;
   $('data-note').textContent = `SGD · ${data.timezone} · Recorded expenses only`;
-  renderCashflow(); renderCategories(); renderTrend(); renderBudget(); renderSubscriptions(); renderTransactions(); renderFeatures();
+  renderCashflow(); renderRecurringCategories(); renderCategories(); renderTrend(); renderBudget(); renderSubscriptions(); renderTransactions(); renderFeatures();
 }
 function renderCategories() {
   const categories = data.categories.filter(cat => cat.amount > 0).sort((a,b) => b.amount - a.amount);
@@ -466,3 +466,9 @@ $('delete-income').addEventListener('click',async()=>{
   try {await api('/income/'+editingIncome,'DELETE');$('income-dialog').close();await refresh();toast('Income deleted');}
   catch(error){$('income-error').textContent=error.message;}
 });
+
+function renderRecurringCategories() {
+  const recorded=new Map(data.categories.map(cat=>[cat.id,cat.amount]));
+  const rows=data.recurring_category_breakdown.filter(cat=>cat.plans.length || recorded.get(cat.id));
+  $('recurring-category-body').innerHTML=`<div class="recurring-category-heading"><span>Category</span><span>Recorded in ${escapeHTML(monthLabel(data.month))}</span><span>Recurring / month</span></div>${rows.map(cat=>`<div class="recurring-category-row"><div><strong>${escapeHTML(cat.label)}</strong>${cat.plans.length?`<details><summary>${cat.plans.length} recurring plan${cat.plans.length===1?'':'s'}</summary>${cat.plans.map(plan=>`<div class="recurring-plan"><span>${escapeHTML(plan.name)}<small>${cash(plan.amount)} · ${escapeHTML(billingLabel(plan))}${plan.start_date>data.today?' · Starts '+escapeHTML(plan.start_date):''}</small></span><strong>${cash(plan.monthly_amount)} / month</strong></div>`).join('')}</details>`:'<small>No active recurring expenses</small>'}</div><span>${cash(recorded.get(cat.id))}</span><strong>${cash(cat.monthly_amount)}</strong></div>`).join('') || '<p class="empty-inline">Add a recurring expense and select its category to see its monthly contribution here.</p>'}<div class="recurring-category-row recurring-category-total"><strong>Total</strong><span>${cash(data.total)}</span><strong>${cash(data.subscription_total)}</strong></div>`;
+}
